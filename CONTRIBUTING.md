@@ -36,6 +36,7 @@ Nix you need:
 ## Development
 
 ```bash
+make run             # Plasma preview with the demo labs (FORM=horizontal: panel)
 make view            # Plasma, desktop form     make view-h   # in a panel
 make view-hyprland   # Quickshell               make run-desktop  # tray app
 eval "$(make -s demo)"   # demo labs for any of the above (python3 tests/demo.py DIR --huge for 700 nodes)

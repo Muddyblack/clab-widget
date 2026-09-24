@@ -54,6 +54,7 @@ ShellRoot {
             property var pinned: []
             property bool notifyNodeDown: true
             property int reminderHours: 0
+            property bool mapWindow: false
             property string corner: "top-right"
             property string mode: "pill"
             property string surfaceStyle: "tint"

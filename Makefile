@@ -1,8 +1,20 @@
-.PHONY: help view view-h view-hyprland hyprland install install-desktop screenshots sync-upstream test test-py test-js lint format pack run-desktop demo icons app-icons tag
+.PHONY: help run view view-h view-hyprland hyprland install install-desktop screenshots sync-upstream test test-py test-js lint format pack run-desktop demo icons app-icons tag
 .DEFAULT_GOAL := help
 
 help: ## list targets
 	@awk 'BEGIN{FS=":.*##"} /^[a-z][a-zA-Z0-9_-]+:.*##/ {printf "  make %-13s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
+
+DEMO_DIR ?= /tmp/clab-demo
+FORM ?= planar
+
+run: ## preview the widget with the demo labs, no Docker needed (FORM=horizontal for a panel)
+	@python3 tests/demo.py $(DEMO_DIR) --large >/dev/null
+	@export CLAB_WIDGET_CLAB_JSON=$(DEMO_DIR)/clab.json CLAB_WIDGET_NETLAB_JSON=$(DEMO_DIR)/netlab.json; \
+	if command -v nix >/dev/null 2>&1 && [ -f flake.nix ]; then \
+	  nix run .#view -- $(FORM); \
+	else \
+	  plasmoidviewer -a package -f $(FORM); \
+	fi
 
 view: ## preview the widget on a desktop (planar)
 	@if command -v nix >/dev/null 2>&1 && [ -f flake.nix ]; then \

@@ -33,6 +33,10 @@
       <label>Filter chip in the popup: all | containerlab | netlab</label>
       <default>all</default>
     </entry>
+    <entry name="mapWindow" type="Bool">
+      <label>Open topology maps in their own window instead of the popup</label>
+      <default>false</default>
+    </entry>
     <entry name="notifyNodeDown" type="Bool">
       <label>Notify when a running node goes down</label>
       <default>true</default>

@@ -98,7 +98,8 @@ Install steps for each: [docs/installation.md](docs/installation.md).
   **Right-click** (or ⋮) for everything: map, open, pin, copy, stop.
 - Nodes: hover for ssh / shell / logs, click the IP to copy it.
 - Map: drag to pan, wheel or pinch to zoom, hover a node to highlight its
-  links, click it for its menu.
+  links, click it for its menu. The ↗ button (or Settings → Labs → "Map in
+  a window") opens it in its own resizable window.
 
 ## Quickshell IPC
 
@@ -119,7 +120,8 @@ make help               # every target
 nix run .#view          # Plasma widget preview
 nix run .#view-hyprland # Quickshell pill + popup
 nix run .#desktop       # tray app (the Windows/macOS/GNOME frontend)
-eval "$(make -s demo)"  # demo labs, no Docker needed
+make run                # widget preview with demo labs, no Docker needed
+eval "$(make -s demo)"  # demo labs for the other frontends
 make test               # backend + schema (python) and shared QML logic (node)
 make screenshots        # re-render docs/readme/*.png
 ```

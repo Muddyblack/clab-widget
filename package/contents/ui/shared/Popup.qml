@@ -18,7 +18,8 @@ Item {
     property double lastOkAt: 0
     property bool failing: false
     // Host settings object (JsonAdapter / Plasmoid.configuration / QtObject)
-    // with: show, tab, pinned, pollSeconds, notifyNodeDown, reminderHours[, corner]
+    // with: show, tab, pinned, pollSeconds, notifyNodeDown, reminderHours,
+    // mapWindow[, corner]
     property var cfg
     property bool showPlacement: false
     // Quickshell only: the pill / desktop-card mode choice in settings.
@@ -96,10 +97,9 @@ Item {
     function labAction(lab, name) {
         if (name === "toggle")
             toggleExpanded(lab.id, model.byKey["L" + lab.id].expanded);
-        else if (name === "map") {
-            mapLabId = lab.id;
-            page = "map";
-        } else if (name === "open")
+        else if (name === "map")
+            openMap(lab.id, cfg && cfg.mapWindow);
+        else if (name === "open")
             run(Labs.openArgs(lab));
         else if (name === "pin")
             cfg.pinned = Labs.togglePin(pins, lab.id);
@@ -109,6 +109,33 @@ Item {
             clipboard.put(lab.name);
         else if (name === "stop")
             confirm = lab;
+    }
+
+    // The map as a popup page, or in its own window (one per lab, raised if open).
+    property var mapWindows: ({})
+    function openMap(labId, inWindow) {
+        if (!inWindow) {
+            mapLabId = labId;
+            page = "map";
+            return;
+        }
+        var w = mapWindows[labId];
+        if (!w) {
+            w = mapWindowComponent.createObject(popup, {
+                popup: popup,
+                labId: labId
+            });
+            mapWindows[labId] = w;
+            w.Component.destruction.connect(() => delete popup.mapWindows[labId]);
+        }
+        w.show();
+        w.raise();
+        w.requestActivate();
+    }
+
+    Component {
+        id: mapWindowComponent
+        MapWindow {}
     }
 
     function nodeAction(lab, node, name) {
@@ -175,7 +202,8 @@ Item {
         menu.popup(x, y, items);
     }
 
-    function nodeMenu(lab, node, x, y) {
+    // `into`: another ContextMenu (the map window's); default the popup's own.
+    function nodeMenu(lab, node, x, y, into) {
         var a = node.access || [];
         var items = [];
         if (a.indexOf("connect") >= 0)
@@ -223,11 +251,12 @@ Item {
                 text: "Copy container name",
                 action: "copy-container"
             });
-        menu.target = {
+        var m = into || menu;
+        m.target = {
             lab: lab,
             node: node
         };
-        menu.popup(x, y, items);
+        m.popup(x, y, items);
     }
 
     // Clipboard without a platform import: a hidden TextEdit copies its selection.
@@ -366,6 +395,16 @@ Item {
                 icon: "zoom-in"
                 tip: "Zoom in"
                 onClicked: mapView.zoomBy(1.3)
+            }
+            IconButton {
+                visible: popup.page === "map"
+                theme: popup.theme
+                icon: "external-link"
+                tip: "Open in a window"
+                onClicked: {
+                    popup.openMap(popup.mapLabId, true);
+                    popup.page = "list";
+                }
             }
 
             // List controls

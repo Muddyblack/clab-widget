@@ -149,6 +149,16 @@ ColumnLayout {
             }
             SettingRow {
                 theme: page.theme
+                label: "Map in a window"
+                desc: "Open topology maps in their own resizable window instead of inside the popup."
+                Toggle {
+                    theme: page.theme
+                    checked: page.get("mapWindow", false)
+                    onToggled: c => page.set("mapWindow", c)
+                }
+            }
+            SettingRow {
+                theme: page.theme
                 label: "Refresh while closed"
                 desc: "Every 5 s while the popup is open."
                 Stepper {

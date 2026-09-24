@@ -37,6 +37,7 @@ Rectangle {
         property var pinned: []
         property bool notifyNodeDown: true
         property int reminderHours: 0
+        property bool mapWindow: false
         property string surfaceStyle: "tint"
         property string appIcon: "clab"
         property bool frosted: true
@@ -49,6 +50,7 @@ Rectangle {
                 pinned: cfg.pinned,
                 notifyNodeDown: cfg.notifyNodeDown,
                 reminderHours: cfg.reminderHours,
+                mapWindow: cfg.mapWindow,
                 surfaceStyle: cfg.surfaceStyle,
                 appIcon: cfg.appIcon,
                 frosted: cfg.frosted
@@ -67,6 +69,7 @@ Rectangle {
         }
         onNotifyNodeDownChanged: save()
         onReminderHoursChanged: save()
+        onMapWindowChanged: save()
         onSurfaceStyleChanged: save()
         onAppIconChanged: {
             save();
