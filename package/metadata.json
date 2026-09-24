@@ -6,7 +6,7 @@
     "Description": "Containerlab & netlab lab status: running labs, node health, and one click back into VS Code or a node shell. Community project, not affiliated with srl-labs/Nokia or ipSpace.",
     "Icon": "org.muddyblack.clabWidget",
     "Category": "System Information",
-    "Version": "0.1.0",
+    "Version": "0.2.0",
     "Website": "https://github.com/Muddyblack/clab-widget",
     "Authors": [
       {
