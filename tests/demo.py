@@ -66,8 +66,9 @@ def main(root, large=False, huge=False):
     roles.update({"srv1": "server", "srv2": "server"})
     links = [(s, lf) for s in ("spine1", "spine2") for lf in ("leaf1", "leaf2", "leaf3")]
     links += [("leaf1", "srv1"), ("leaf3", "srv2")]
-    # Ends outside the lab: a host veth and a macvlan on the host's NIC.
-    links += [("srv1", "host:srv1-eth2"), ("srv2", "macvlan:enp3s0")]
+    # Ends outside the lab: a host veth and a macvlan on the host's NIC (containerlab
+    # records both far ends as node "host").
+    links += [("srv1", "host:srv1-eth2"), ("srv2", "host:enp3s0")]
 
     def topo_data(nodes, pairs):
         """Each end gets the node's next e1-N (or the given host-side name)."""
@@ -89,7 +90,7 @@ def main(root, large=False, huge=False):
         out = {}
         for link in data["links"]:
             for ep in link["endpoints"].values():
-                if ep["node"] in ("host", "macvlan"):
+                if ep["node"] == "host":
                     continue
                 state = "down" if (ep["node"], ep["interface"]) in down else "up"
                 out.setdefault(f"clab-{lab}-{ep['node']}", {})[ep["interface"]] = state

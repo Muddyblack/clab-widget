@@ -331,7 +331,7 @@ class LinkState(unittest.TestCase):
         self.assertIs(up[("spine1", "leaf1")], True)
         self.assertIs(up[("spine2", "leaf3")], False)  # shut
         self.assertIs(up[("spine1", "leaf2")], False)  # leaf2 exited
-        self.assertIs(up[("srv2", "macvlan")], True)
+        self.assertIs(up[("srv2", "host")], True)  # macvlan
 
 
 class Uptime(unittest.TestCase):

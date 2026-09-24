@@ -141,3 +141,6 @@ the clab-ui node icons (generated from `SvgGenerator.ts`) and the containerlab
 logo from [srl-labs/containerlab-app](https://github.com/srl-labs/containerlab-app)
 (MIT), and the netlab-ui logo from
 [Muddyblack/netlab-ui](https://github.com/Muddyblack/netlab-ui) (Apache-2.0).
+The data files in `package/contents/upstream/` come from clab-ui and the
+containerlab VS Code extension (Apache-2.0). Each set ships its license next to
+it (`LICENSE-*.txt`), so they're in the `.plasmoid` too.
