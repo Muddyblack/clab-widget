@@ -103,6 +103,56 @@ PlasmoidItem {
         }
     }
 
+    // Remote hosts page: list / add (ssh, netlab-ui) / remove through the backend;
+    // a clab-api-server login asks for its password in a terminal.
+    property var connections: []
+    property string connStatus: ""
+    property bool connBusy: false
+
+    function loadConnections() {
+        connSource.connectSource(root.tool(["connections"]));
+    }
+
+    function addConnection(conn) {
+        if (conn.type === "clab-api") {
+            var args = ["login", conn.name, conn.url, conn.username || "", "--terminal"];
+            if (conn.insecure)
+                args.push("--insecure");
+            root.runAction(args);
+            root.connStatus = "log in in the terminal window, then refresh";
+            return;
+        }
+        root.connBusy = true;
+        root.connStatus = "";
+        connSource.connectSource(root.tool(["add", JSON.stringify(conn)]));
+    }
+
+    function removeConnection(name) {
+        connSource.connectSource(root.tool(["logout", name, "--forget"]));
+    }
+
+    Plasma5Support.DataSource {
+        id: connSource
+        engine: "executable"
+        onNewData: function (src, data) {
+            disconnectSource(src);
+            var out = null;
+            try {
+                out = JSON.parse(data["stdout"]);
+            } catch (e) {}
+            if (Array.isArray(out)) {
+                root.connections = out;
+                return;
+            }
+            if (out && out.message !== undefined) {
+                root.connBusy = false;
+                root.connStatus = out.message;
+            }
+            root.loadConnections();
+            root.refresh();
+        }
+    }
+
     Plasma5Support.DataSource {
         id: actionSource
         engine: "executable"
@@ -208,6 +258,21 @@ PlasmoidItem {
                     stopRefresh.restart();
             }
             onRefreshRequested: root.refresh()
+            extraTitle: "Remote hosts"
+            extraPage: Component {
+                ConnectionsPage {
+                    showHeader: false
+                    passwordLogin: false
+                    theme: root.theme
+                    connections: root.connections
+                    status: root.connStatus
+                    busy: root.connBusy
+                    onAddRequested: (conn, _password) => root.addConnection(conn)
+                    onRemoveRequested: name => root.removeConnection(name)
+                    onDone: pop.page = "list"
+                    Component.onCompleted: root.loadConnections()
+                }
+            }
         }
     }
 }

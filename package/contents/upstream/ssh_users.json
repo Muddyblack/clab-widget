@@ -1,0 +1,10 @@
+{
+  "arista_ceos": "admin",
+  "cisco_xrd": "clab",
+  "cisco_xrd_vrouter": "clab",
+  "cisco_xrv": "clab",
+  "cisco_xrv9k": "clab",
+  "juniper_crpd": "root",
+  "nokia_srlinux": "admin",
+  "nokia_sros": "admin"
+}

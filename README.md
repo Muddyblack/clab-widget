@@ -1,120 +1,139 @@
-<p align="center"><img src="assets/icon.png" width="160" alt="CLAB Widget icon"></p>
+<p align="center">
+  <img src="assets/icon.png" width="150" alt="CLAB Widget icon (containerlab)">
+  &nbsp;&nbsp;
+  <img src="assets/icon-netlab.png" width="150" alt="CLAB Widget icon (netlab)">
+</p>
 
-# CLAB Widget
+<h1 align="center">CLAB Widget</h1>
 
-Containerlab & netlab lab status on your desktop: which labs are running, which
-nodes are down, how much memory they use, and one click back into the
-containerlab app, netlab-ui, VS Code or a node shell. It complements
-containerlab-app and netlab-ui rather than replacing them.
+<p align="center">
+  <a href="https://github.com/Muddyblack/clab-widget/releases">
+    <img src="https://img.shields.io/badge/Download-Releases-1d99f3?style=for-the-badge&logo=github&logoColor=white" alt="Download" />
+  </a>
+  <img src="https://img.shields.io/badge/KDE_Plasma-6-1d99f3?style=for-the-badge&logo=kde&logoColor=white" alt="KDE Plasma 6" />
+  <img src="https://img.shields.io/badge/Hyprland-Quickshell-58e1ff?style=for-the-badge" alt="Hyprland / Quickshell" />
+  <img src="https://img.shields.io/badge/Windows_·_macOS_·_GNOME-tray_app-4aa8ff?style=for-the-badge" alt="Windows, macOS, GNOME tray app" />
+  <br/>
+  <a href="LICENSE">
+    <img src="https://img.shields.io/badge/License-GPL--3.0-blue?style=for-the-badge" alt="License: GPL-3.0" />
+  </a>
+  <a href="https://github.com/Muddyblack/clab-widget/releases">
+    <img src="https://img.shields.io/github/downloads/Muddyblack/clab-widget/total?style=for-the-badge&logo=github&logoColor=white&label=GitHub%20Downloads&color=blue" alt="GitHub Downloads" />
+  </a>
+  <img src="https://img.shields.io/badge/Started-September_2026-9c27b0?style=for-the-badge" alt="Project started September 2026" />
+</p>
 
-Frontends: KDE Plasma 6 widget, Hyprland/Quickshell pill, and a tray app for
-Windows, macOS and other Linux desktops. All three share one backend and the
-same QML components.
+<p align="center">
+  <img src="docs/readme/labs.png" width="520" alt="The popup: four labs, one expanded with its nodes, a stopped node in red, a lab on an ssh host tagged @lab-box">
+</p>
+
+**Containerlab & netlab lab status on your desktop:** which labs are running,
+which nodes are down, how much memory they use, and one click back into the
+containerlab app, netlab-ui, VS Code or a node shell. For the labs on this
+machine, on as many lab servers as you like (ssh, WSL, clab-api-server,
+netlab-ui), and on Kubernetes through clabernetes. It complements containerlab-app and netlab-ui rather than
+replacing them.
 
 > Community project. Not affiliated with srl-labs/Nokia (containerlab) or ipSpace (netlab).
-> Lab badges use the containerlab logo from [srl-labs/containerlab-app](https://github.com/srl-labs/containerlab-app) (MIT)
-> and the netlab-ui logo from [Muddyblack/netlab-ui](https://github.com/Muddyblack/netlab-ui) (Apache-2.0).
-> Node icons are generated from clab-ui's `SvgGenerator.ts` (containerlab-app, MIT).
 
-## What it shows
+## Screenshots
 
-- Every lab on this host, from `containerlab inspect` and `netlab status`. A
-  netlab lab running on containerlab appears once, as a "netlab · via clab" card.
-- Per node: clab-ui role icon, state, management IP, memory (while open).
-- A read-only topology map (links from `topology-data.json`, positions from
-  clab-ui's `.annotations.json` when present).
-- Remote labs through clab-api-server and netlab-ui.
-- **Show**: both together, both as containerlab | netlab tabs, or only one.
+| Topology map | 102-node fabric |
+| :---: | :---: |
+| <img src="docs/readme/map.png" width="400" alt="Topology map of a leaf-spine lab with clab-ui role icons; links to the down leaf dashed red"> | <img src="docs/readme/map-large.png" width="400" alt="A 102-node data-centre fabric laid out by tiers"> |
+| **Right-click a lab** | **Search: `down`** |
+| <img src="docs/readme/menu.png" width="400" alt="Lab context menu: nodes, map, open, pin, copy, destroy"> | <img src="docs/readme/search-down.png" width="400" alt="Searching 'down' lists every node that isn't running"> |
+| **Remote hosts** | **Settings** |
+| <img src="docs/readme/hosts.png" width="400" alt="Remote hosts page: an ssh host, a Kubernetes cluster (clabernetes), a clab-api-server and a netlab-ui server"> | <img src="docs/readme/settings.png" width="400" alt="Settings in subtabs (Labs, Alerts, Look, Info); the Look tab: glass material, app icon, frosted blur"> |
 
-Actions: copy IP, node shell (ssh / `docker exec`), open in the owning app,
-and **stop**. Stop asks you to confirm, re-checks that the lab is unchanged,
-and runs through its owner (`netlab down` or `containerlab destroy`) in a
-terminal.
+The screenshots are rendered from the demo labs: `make screenshots`.
 
-Notifications (debounced over two polls): a node goes down or disappears, a
-tool or host becomes unreachable, and an optional reminder for labs left
-running. The reminder never tears anything down.
+## Features
+
+- **Every lab**: containerlab and netlab side by side. A netlab lab running on
+  containerlab shows up once, as a "netlab · via clab" card. Show both, both as
+  tabs, or only one.
+- **Node health**: running / partial / stopped, per-node state and management
+  IP, memory per lab and node (while the popup is open), uptime.
+- **Topology map**, drawn from the JSON that clab-ui draws from:
+  `topology-data.json` links, `graph-icon` roles, clab-ui's
+  `.annotations.json` (icon, colour, position), and legacy
+  `graph-posX/posY` labels. It uses clab-ui's own role icons. Pan, zoom,
+  pinch and fit. Hover a node to highlight its links. Labs of 150+ nodes are
+  drawn as tiles, so a 700-node fabric stays smooth.
+- **One click back**: ssh (per-kind user) or `netlab connect`, docker shell
+  (`sr_cli`…), logs, open in the containerlab app / netlab-ui / VS Code, like
+  the containerlab VS Code extension does it.
+- **Stop, carefully**: confirm, re-check that the lab is unchanged, then run it
+  through its owner (`netlab down` / `containerlab destroy`) in a terminal.
+- **Remote hosts**: ssh and WSL run the widget's own status script on the lab
+  machine, so you get everything a local widget there would show. Also
+  clab-api-server and netlab-ui servers. See [docs/remote-hosts.md](docs/remote-hosts.md).
+- **Kubernetes (clabernetes)**: containerlab topologies on k8s / k3s / kind
+  through [clabernetes](https://github.com/srl-labs/clabernetes). Node
+  readiness, links and map, `kubectl exec` / logs, delete. Open jumps to the
+  Topology in [Kubus](https://github.com/FloSch62/Kubus).
+- **Notifications** (debounced over two polls): a node goes down or
+  disappears, a tool or host becomes unreachable, and an opt-in reminder for
+  labs left running (it never tears anything down).
+- **Pin labs** to the panel item, the pill and the tray tooltip: `● fabric 6/7 · ● ospf 3/3`.
+- **Glass look** from Glassy System Monitor: frosted, solid, atmosphere, glass,
+  liquid. A containerlab or netlab app icon, or auto.
 
 ## Where it lives
 
-- **KDE Plasma:** on the desktop it is the glass card itself (resize it like any widget); in a panel it's an icon with a popup; it can also sit in the **system tray** (System Tray Settings → Entries → CLAB Widget) and asks for attention when a lab breaks.
-- **Hyprland / Quickshell:** `mode` in settings: a pill in a corner with a popup, or a **desktop card** below your windows. For blur behind the glass: `layerrule = blur, clab-widget-glass`.
-- **Windows / macOS / other desktops:** the tray app (`nix run .#desktop`).
+| | |
+| --- | --- |
+| **KDE Plasma 6** | Desktop glass card, panel icon + popup, or the system tray |
+| **Hyprland / Quickshell** | A pill in a corner with the popup, or a desktop card below your windows |
+| **Windows / macOS** | Tray app with installer / dmg. Labs come from remote hosts (WSL2, ssh, API) |
+| **GNOME & other Linux desktops** | The same tray app (`make install-desktop`); a normal window when there is no tray |
 
-The card uses the same glass materials as Glassy System Monitor and the audio visualizer (Settings → Appearance: frosted, solid, atmosphere, glass, liquid glass).
+Install steps for each: [docs/installation.md](docs/installation.md).
 
 ## Using it
 
-- Header: search (names, kinds, IPs, state; `down` = every node that isn't running), refresh, settings.
-- Click a lab to show its nodes; hover a row for quick actions; **right-click** (or ⋮) for everything: map, open, pin, copy, stop.
+- Header: search (names, kinds, IPs, state; `down` = every node that isn't
+  running), refresh, remote hosts, settings.
+- Click a lab to show its nodes. Hover a row for quick actions.
+  **Right-click** (or ⋮) for everything: map, open, pin, copy, stop.
 - Nodes: hover for ssh / shell / logs, click the IP to copy it.
-- Map: drag to pan, wheel or pinch to zoom, hover a node to highlight its links, click it for its menu.
-  Labs with 150+ nodes are drawn as tiles (shaded by tier) so a 700-node fabric stays smooth.
+- Map: drag to pan, wheel or pinch to zoom, hover a node to highlight its
+  links, click it for its menu.
 
-The snapshot format the UI consumes is documented as a JSON Schema: [`docs/snapshot.schema.json`](docs/snapshot.schema.json).
-
-## Run
-
-```bash
-direnv allow            # or: nix develop — ships containerlab + netlab
-nix run .#view          # Plasma widget preview
-nix run .#view-hyprland # Quickshell pill + popup
-nix run .#desktop       # tray app (the Windows/macOS frontend)
-```
-
-Demo without any labs:
-
-```bash
-eval "$(python3 tests/demo.py /tmp/clab-demo)"   # writes lab dirs + saved tool output
-CLAB_WIDGET_OPEN=1 nix run .#view-hyprland
-```
-
-## Quickshell IPC (keybinds)
+## Quickshell IPC
 
 With the Quickshell version running (`qs -p .` or `nix run .#view-hyprland`):
 
 ```bash
-qs ipc -p /path/to/CLAB-Widget call panel toggle     # open | close | refresh | settings | quit
-qs ipc -p /path/to/CLAB-Widget call panel setShow tabs   # both | tabs | containerlab | netlab
+qs ipc -p /path/to/clab-widget call panel toggle          # open | close | refresh | settings | quit
+qs ipc -p /path/to/clab-widget call panel setShow tabs    # both | tabs | containerlab | netlab
 ```
 
-Hyprland: `bind = SUPER, L, exec, qs ipc -p /path/to/CLAB-Widget call panel toggle`
+Hyprland: `bind = SUPER, L, exec, qs ipc -p /path/to/clab-widget call panel toggle`
 
-## Remote hosts
+## Development
 
 ```bash
-package/contents/tools/clab-status login lab-server https://lab-server:8090 alice [--insecure]
+direnv allow            # or: nix develop (ships containerlab + netlab)
+make help               # every target
+nix run .#view          # Plasma widget preview
+nix run .#view-hyprland # Quickshell pill + popup
+nix run .#desktop       # tray app (the Windows/macOS/GNOME frontend)
+eval "$(make -s demo)"  # demo labs, no Docker needed
+make test               # backend + schema (python) and shared QML logic (node)
+make screenshots        # re-render docs/readme/*.png
 ```
 
-This prompts for the password once and stores only the returned token
-(`~/.local/state/clab-widget/tokens.json`, mode 600). Connections live in
-`~/.config/clab-widget/connections.json`. The tray app has a form for this. A
-netlab-ui server is added as `{"type": "netlab-ui", "url": …}`. Give both
-connections to one machine the same `group` and their labs merge into one card
-each.
+The UI renders the backend's snapshot as-is. Its format is a JSON Schema:
+[docs/snapshot.schema.json](docs/snapshot.schema.json). Contributing and
+releases: [CONTRIBUTING.md](CONTRIBUTING.md). What's next: [TODO.md](TODO.md).
 
-## Test
+## Credits & license
 
-```bash
-nix flake check                 # backend (python) + shared QML logic (node) tests
-tests/integration.sh [netlab]   # real mini lab, needs Docker + sudo
-QML_XHR_ALLOW_FILE_READ=1 QT_QPA_PLATFORM=offscreen \
-  qml tests/render/Render.qml -- snap.json out.png   # render map/tabs/settings
-```
-
-See [TODO.md](TODO.md) for what's next.
-
-## License
-
-GPL-3.0-or-later, see [LICENSE](LICENSE). Bundled third-party artwork keeps its
+GPL-3.0, see [LICENSE](LICENSE). Bundled third-party artwork keeps its
 own license: Lucide icons (ISC, `package/contents/icons/ui/LICENSE-lucide.txt`),
-clab-ui node icons and the containerlab logo (MIT, srl-labs/containerlab-app),
-the netlab-ui logo (Apache-2.0).
-
-## Development & releases
-
-`make help` lists everything (`view`, `view-h`, `view-hyprland`, `run-desktop`,
-`demo`, `install`, `test`, `lint`, `format`, `pack`, `tag`). `make tag` bumps the
-version, tags and pushes; GitHub Actions then publishes the `.plasmoid` and
-attaches the Windows installer / zip and the macOS dmg / zip. Details in
-[CONTRIBUTING.md](CONTRIBUTING.md).
+the clab-ui node icons (generated from `SvgGenerator.ts`) and the containerlab
+logo from [srl-labs/containerlab-app](https://github.com/srl-labs/containerlab-app)
+(MIT), and the netlab-ui logo from
+[Muddyblack/netlab-ui](https://github.com/Muddyblack/netlab-ui) (Apache-2.0).

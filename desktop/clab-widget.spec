@@ -16,10 +16,10 @@ APP = "CLAB Widget"
 
 datas = [
     (os.path.join(ROOT, "desktop", "Main.qml"), "desktop"),
-    (os.path.join(ROOT, "desktop", "ConnectionsPage.qml"), "desktop"),
     (os.path.join(ROOT, "package", "contents", "code"), os.path.join("package", "contents", "code")),
     (os.path.join(ROOT, "package", "contents", "ui", "shared"), os.path.join("package", "contents", "ui", "shared")),
     (os.path.join(ROOT, "package", "contents", "icons"), os.path.join("package", "contents", "icons")),
+    (os.path.join(ROOT, "package", "contents", "upstream"), os.path.join("package", "contents", "upstream")),
     (os.path.join(ROOT, "package", "contents", "shaders"), os.path.join("package", "contents", "shaders")),
     (os.path.join(ROOT, "package", "contents", "tools", "clab-status"), os.path.join("package", "contents", "tools")),
 ]
@@ -31,9 +31,28 @@ elif sys.platform == "darwin":
 else:
     icon = None
 
+
+def backend_imports():
+    """Every module the backend imports. app.py loads clab-status from source at
+    run time, so PyInstaller can't see these (a missing one = the frozen app dies
+    at start, and on Windows it then waits behind an error dialog)."""
+    import ast
+
+    with open(os.path.join(ROOT, "package", "contents", "tools", "clab-status"), encoding="utf-8") as f:
+        tree = ast.parse(f.read())
+    names = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            names.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
+            names.add(node.module)
+    return sorted(n for n in names if not (n == "grp" and sys.platform == "win32"))  # POSIX only
+
+
 a = Analysis(  # noqa: F821
     [os.path.join(ROOT, "desktop", "app.py")],
     datas=datas,
+    hiddenimports=backend_imports(),
     excludes=["tkinter"],
 )
 pyz = PYZ(a.pure)  # noqa: F821

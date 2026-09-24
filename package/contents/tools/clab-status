@@ -10,7 +10,18 @@
     clab-status notify <title> <body>  desktop notification
     clab-status login <name> [<url> <user>] [--insecure] [--ca FILE]
                                        add/refresh a clab-api-server connection
+    clab-status login <name> ssh://[user@]host[:port] [--identity FILE] [--group G]
+                                       add a lab host reached over ssh (key login)
+    clab-status login <name> wsl://[distro]
+                                       add containerlab inside WSL2 (Windows)
+    clab-status login <name> k8s://[context][/namespace] [--kubeconfig FILE]
+                                       add a Kubernetes cluster running clabernetes
     clab-status logout <name> [--forget]
+    clab-status connections            the remote hosts as JSON (no tokens)
+    clab-status add '<connection JSON>'
+                                       add an ssh / netlab-ui host (prints {"ok", "message"})
+    clab-status login <name> <url> <user> --terminal
+                                       the password prompt in a terminal window
     clab-status stop <labId> <fingerprint>
                                        tear a lab down via its owner (re-checked)
 
@@ -31,6 +42,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -46,20 +58,31 @@ RUNNING_STATES = {"running"}
 # Kinds without an SSH daemon by default: no "ssh", only a docker shell.
 EXEC_KINDS = {"linux", "bridge", "ovs-bridge", "host", "ext-container"}
 
+# Data taken from upstream projects lives in ../upstream, refreshed by
+# tools/sync-upstream.py (make sync-upstream), never edited by hand.
+UPSTREAM_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "upstream")
+UPSTREAM_FILES = ("clab-ui-roles.json", "exec_cmd.json", "ssh_users.json")
+# Filled in by own_source() when this script is sent to an ssh / WSL host
+# (python3 -), where there is no upstream/ folder next to it.
+UPSTREAM_INLINE = {}
+
+
+def upstream(name):
+    if name in UPSTREAM_INLINE:
+        return UPSTREAM_INLINE[name]
+    try:
+        with open(os.path.join(UPSTREAM_DIR, name), encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
 # From the containerlab VS Code extension (resources/exec_cmd.json and
 # ssh_users.json): what `docker exec` runs per kind, and the SSH user per kind.
 # $CLAB_WIDGET_EXEC_<KIND> / $CLAB_WIDGET_SSH_USER_<KIND> override them.
-EXEC_CMD = {"nokia_srlinux": "sr_cli", "cisco_xrd": "/pkg/bin/xr_cli.sh"}
-SSH_USERS = {
-    "nokia_srlinux": "admin",
-    "nokia_sros": "admin",
-    "cisco_xrd": "clab",
-    "cisco_xrv9k": "clab",
-    "cisco_xrd_vrouter": "clab",
-    "cisco_xrv": "clab",
-    "arista_ceos": "admin",
-    "juniper_crpd": "root",
-}
+EXEC_CMD = upstream("exec_cmd.json")
+SSH_USERS = upstream("ssh_users.json")
 
 
 # ── Running the tools ──────────────────────────────────────────────────────────
@@ -186,29 +209,14 @@ def normalize_clab(data):
 # optional <topology>.annotations.json holds the icon, colour and canvas
 # position someone picked in the editor. Both are read-only here.
 
+# icons/nodes/<role>.svg are clab-ui's SvgGenerator.ts output; clab-ui-roles.json
+# holds its ROLE_SVG_MAP (role label → icon; unknown roles fall back to "pe")
+# and DEFAULT_ICON_COLOR (the colour custom node colours replace).
 ICON_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "icons", "nodes")
-DEFAULT_ICON_COLOR = "#005aff"  # clab-ui's DEFAULT_ICON_COLOR
-
-# clab-ui's ROLE_SVG_MAP: role label → icon. Unknown roles fall back to "pe".
-ROLE_SVG_MAP = {
-    "router": "pe",
-    "default": "pe",
-    "pe": "pe",
-    "p": "pe",
-    "controller": "controller",
-    "pon": "pon",
-    "dcgw": "dcgw",
-    "leaf": "leaf",
-    "switch": "switch",
-    "rgw": "rgw",
-    "super-spine": "super-spine",
-    "spine": "spine",
-    "server": "server",
-    "bridge": "bridge",
-    "ue": "ue",
-    "cloud": "cloud",
-    "client": "client",
-}
+_CLAB_UI = upstream("clab-ui-roles.json")
+DEFAULT_ICON_COLOR = str(_CLAB_UI.get("defaultIconColor") or "#005aff").lower()
+ROLE_SVG_MAP = _CLAB_UI.get("roleSvgMap") or {"pe": "pe", "bridge": "bridge"}
+ROLE_ICONS = set(ROLE_SVG_MAP.values())
 BRIDGE_KINDS = {"bridge", "ovs-bridge"}
 
 
@@ -243,6 +251,14 @@ def node_icon(role, color):
     return target
 
 
+def label_position(labels):
+    try:
+        x, y = float(labels.get("graph-posX", "")), float(labels.get("graph-posY", ""))
+    except (TypeError, ValueError):
+        return None
+    return {"x": x, "y": y} if all(v == v and abs(v) != float("inf") for v in (x, y)) else None
+
+
 def enrich_topology(lab):
     """Add role/icon/position per node and the lab's links, where available."""
     if not lab["topologyFile"] or lab.get("remote"):
@@ -262,9 +278,17 @@ def enrich_topology(lab):
             role = "bridge" if node["kind"] in BRIDGE_KINDS else "pe"
         node["role"] = role
         node["icon"] = node_icon(role, a.get("iconColor", ""))
+        if a.get("iconColor"):
+            node["iconColor"] = a["iconColor"]
         pos = a.get("position")
         if isinstance(pos, dict) and isinstance(pos.get("x"), (int, float)) and isinstance(pos.get("y"), (int, float)):
             node["position"] = {"x": pos["x"], "y": pos["y"]}
+        else:
+            # Older topologies keep the canvas position in graph-posX/-posY
+            # labels; clab-ui migrates those into the annotations on open.
+            xy = label_position(labels)
+            if xy:
+                node["position"] = xy
 
     links = []
     for link in tdata.get("links") or []:
@@ -297,9 +321,13 @@ def default_icons(lab):
 #   [{"name": "lab-server", "url": "https://lab-server:8090", "username": "me",
 #     "insecure": false, "caFile": "", "group": "lab-server"},
 #    {"name": "lab-server-netlab", "type": "netlab-ui",
-#     "url": "http://lab-server:8000", "group": "lab-server"}]
-# type is "clab-api" (default) or "netlab-ui"; connections with the same group
-# are the same machine.
+#     "url": "http://lab-server:8000", "group": "lab-server"},
+#    {"name": "lab-box", "type": "ssh", "host": "me@lab-box", "port": 22,
+#     "identity": "~/.ssh/id_ed25519"}]
+# type is "clab-api" (default), "netlab-ui" or "ssh"; connections with the same
+# group are the same machine. "ssh" runs this script on the host (python3 -,
+# key login only) and so sees everything a local widget there would: both
+# tools, topology, memory. Node shells, stop and open go over ssh as well.
 # Tokens (JWT from POST /login, never the password):
 #   ~/.local/state/clab-widget/tokens.json, mode 0600
 # GET /api/v1/labs returns the same per-container objects as
@@ -317,11 +345,26 @@ def state_dir():
     return os.path.join(os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state"), "clab-widget")
 
 
+def valid_connection(c):
+    if not isinstance(c, dict) or not c.get("name"):
+        return False
+    if c.get("type") == "ssh":
+        port = c.get("port")
+        if port not in (None, "") and not (str(port).isdigit() and 0 < int(port) < 65536):
+            return False
+        return bool(str(c.get("host", "")).strip()) and not str(c["host"]).startswith("-")
+    if c.get("type") == "wsl":
+        return not str(c.get("distro", "")).startswith("-")
+    if c.get("type") == "k8s":
+        return not any(str(c.get(k, "")).startswith("-") for k in ("context", "namespace", "kubeconfig"))
+    return str(c.get("url", "")).startswith("http")
+
+
 def load_connections():
     data, _err = read_json_file(os.path.join(config_dir(), "connections.json"))
     if not isinstance(data, list):
         return []
-    return [c for c in data if isinstance(c, dict) and c.get("name") and str(c.get("url", "")).startswith("http")]
+    return [c for c in data if valid_connection(c)]
 
 
 def save_connections(conns):
@@ -436,13 +479,377 @@ def fetch_netlab_ui(conn, tokens):
     ], None
 
 
-def collect_remotes(conns, tokens, fetch_clab=None, fetch_nl=None):
+# ── Hosts reached through a command: ssh, WSL ──────────────────────────────────
+#
+# "ssh": any Linux lab machine. "wsl": containerlab inside WSL2 on this Windows
+# machine (containerlab's own Windows story); "distro" picks one, else the
+# default. Both run this script there and act there the same way.
+
+SSH_TIMEOUT = 30
+SSH_BIN = "ssh"  # OpenSSH: built into Windows 10+, macOS and every Linux
+WSL_BIN = "wsl.exe"
+HOST_TYPES = ("ssh", "wsl")
+
+
+def ssh_argv(conn, interactive=False):
+    """ssh options + destination. Background polls never prompt (BatchMode):
+    they need key login (ssh-agent, or "identity"). A terminal (interactive)
+    may ask for a passphrase or a sudo password."""
+    argv = [shutil.which(SSH_BIN) or SSH_BIN]
+    if interactive:
+        argv.append("-t")
+    else:
+        argv += ["-o", "BatchMode=yes", "-o", "ConnectTimeout=8"]
+    # First contact adds the host key; a changed key still refuses.
+    argv += ["-o", "StrictHostKeyChecking=accept-new"]
+    if conn.get("port"):
+        argv += ["-p", str(int(conn["port"]))]
+    if conn.get("identity"):
+        argv += ["-i", os.path.expanduser(str(conn["identity"]))]
+    return argv + ["--", str(conn["host"])]
+
+
+def remote_sh(script):
+    """One argument for ssh: the remote login shell runs `sh -lc <script>`, so
+    ~/.profile PATH additions (pip --user, a netlab venv) apply."""
+    return "sh -lc " + shlex.quote(script)
+
+
+def host_argv(conn, script, interactive=False):
+    """argv that runs a shell script on the connection's host."""
+    if conn.get("type") == "wsl":
+        argv = [shutil.which(WSL_BIN) or WSL_BIN]
+        if conn.get("distro"):
+            argv += ["-d", str(conn["distro"])]
+        return argv + ["-e", "sh", "-lc", script]
+    return ssh_argv(conn, interactive) + [remote_sh(script)]
+
+
+def own_source():
+    """This script as sent to a host, with the upstream data inlined."""
+    with open(os.path.abspath(__file__), "rb") as f:
+        src = f.read()
+    inline = json.dumps({name: upstream(name) for name in UPSTREAM_FILES}, separators=(",", ":"))
+    return src.replace(b"\nUPSTREAM_INLINE = {}\n", ("\nUPSTREAM_INLINE = " + inline + "\n").encode(), 1)
+
+
+def ssh_error(proc, kind="ssh"):
+    # wsl.exe reports its own errors in UTF-16.
+    raw = proc.stderr or b""
+    text = (
+        raw.decode("utf-16-le", errors="replace") if kind == "wsl" and b"\x00" in raw else raw.decode(errors="replace")
+    )
+    lines = [ln for ln in text.splitlines() if ln.strip()]
+    if kind == "wsl" and proc.returncode not in (0, 1, 127):
+        return "wsl: " + (lines[-1] if lines else f"exited with {proc.returncode}")
+    if proc.returncode == 255:
+        return "ssh: " + (lines[-1] if lines else "connection failed")
+    if proc.returncode == 127 or any("python3: not found" in ln or "No such file" in ln for ln in lines[-2:]):
+        return "python3 not found on the host"
+    return lines[-1] if lines else f"exited with {proc.returncode}"
+
+
+def fetch_ssh(conn, details=False, run=subprocess.run):
+    """Snapshot of one ssh host: this very script, fed to `python3 -` there.
+    → (snapshot dict or None, error)."""
+    python = shlex.quote(str(conn.get("python") or "python3"))
+    remote = f"exec {python} - snapshot --no-remote" + (" --details" if details else "")
+    no_window = {"creationflags": 0x08000000} if os.name == "nt" else {}  # CREATE_NO_WINDOW
+    kind = "wsl" if conn.get("type") == "wsl" else "ssh"
+    try:
+        proc = run(
+            host_argv(conn, remote),
+            input=own_source(),
+            capture_output=True,
+            timeout=SSH_TIMEOUT,
+            **no_window,
+        )
+    except FileNotFoundError:
+        return (
+            None,
+            "wsl.exe not found (WSL not installed)" if kind == "wsl" else "ssh not found (install the OpenSSH client)",
+        )
+    except subprocess.TimeoutExpired:
+        return None, f"{kind} timed out after {SSH_TIMEOUT}s"
+    # The snapshot is the last line: login-shell profiles may print first.
+    lines = proc.stdout.strip().splitlines()
+    try:
+        snap = json.loads(lines[-1]) if lines else None
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        snap = None
+    if proc.returncode != 0 or not isinstance(snap, dict):
+        return None, ssh_error(proc, kind)
+    return snap, None
+
+
+def ssh_labs(conn, snap):
+    """The host's labs, tagged as remote-over-ssh. Paths stay the host's; node
+    icons point at this machine's copies again (the host's cache paths mean
+    nothing here). finish() recomputes actions and access for this side."""
+    group = conn.get("group") or conn["name"]
+    labs = []
+    for lab in snap.get("labs") or []:
+        if not isinstance(lab, dict) or not isinstance(lab.get("nodes"), list):
+            continue
+        lab = dict(lab)
+        for key in ("actions", "fingerprint", "lifecycle", "running", "total"):
+            lab.pop(key, None)
+        lab["id"] = f"remote:{conn['name']}:{lab.get('id', '')}"
+        lab.update(host=group, conn=conn["name"], remote=True, via=conn.get("type", "ssh"))
+        if conn.get("type") == "wsl":
+            lab["wslDistro"] = str(conn.get("distro") or "")
+        else:
+            lab["sshHost"] = str(conn["host"])
+        nodes = []
+        for node in lab["nodes"]:
+            node = dict(node)
+            node.pop("access", None)
+            role = node.get("role") if node.get("role") in ROLE_ICONS else "pe"
+            node["role"] = role
+            node["icon"] = node_icon(role, node.get("iconColor", ""))
+            nodes.append(node)
+        lab["nodes"] = nodes
+        lab.setdefault("links", [])
+        labs.append(lab)
+    return labs
+
+
+def ssh_source_error(snap):
+    """A host where neither tool answers is an error; one working tool is fine."""
+    sources = {k: v for k, v in (snap.get("sources") or {}).items() if isinstance(v, dict)}
+    if any(v.get("available") for v in sources.values()):
+        return None
+    errors = [f"{k}: {v['error']}" for k, v in sources.items() if v.get("error")]
+    return "; ".join(errors) if errors else "neither containerlab nor netlab found on the host"
+
+
+# ── clabernetes (containerlab on Kubernetes: k8s, k3s, kind…) ──────────────────
+#
+# {"name": "k3s", "type": "k8s", "context": "k3s-lab", "namespace": "",
+#  "kubeconfig": ""}: kubectl with this machine's kubeconfig (empty context =
+# the current one, empty namespace = all). clabernetes (API group c9s.run)
+# emits a Topology per lab and a Node / Link object per lab node / link; each
+# Node runs as a Deployment of the same name, so `kubectl exec deploy/<node>`
+# reaches the device. "open" deep-links into Kubus (a Kubernetes GUI).
+
+KUBECTL_BIN = "kubectl"
+C9S_GROUP = "c9s.run"
+C9S_VERSION = "v1alpha1"
+C9S_OWNER = C9S_GROUP + "/topologyOwner"
+C9S_NODE = C9S_GROUP + "/topologyNode"
+K8S_TIMEOUT = 20
+
+
+def kubectl_argv(conn):
+    argv = [shutil.which(KUBECTL_BIN) or KUBECTL_BIN]
+    if conn.get("kubeconfig"):
+        argv += ["--kubeconfig", os.path.expanduser(str(conn["kubeconfig"]))]
+    if conn.get("context"):
+        argv += ["--context", str(conn["context"])]
+    return argv
+
+
+def fetch_k8s(conn, run=subprocess.run):
+    """Topologies, Nodes and Links in one `kubectl get` → (items, error)."""
+    scope = ["-n", str(conn["namespace"])] if conn.get("namespace") else ["-A"]
+    kinds = ",".join(f"{k}.{C9S_GROUP}" for k in ("topologies", "nodes", "links"))
+    argv = kubectl_argv(conn) + ["get", kinds, *scope, "-o", "json", "--request-timeout=10s"]
+    no_window = {"creationflags": 0x08000000} if os.name == "nt" else {}
+    try:
+        proc = run(argv, capture_output=True, text=True, timeout=K8S_TIMEOUT, stdin=subprocess.DEVNULL, **no_window)
+    except FileNotFoundError:
+        return None, "kubectl not found"
+    except subprocess.TimeoutExpired:
+        return None, f"kubectl timed out after {K8S_TIMEOUT}s"
+    if proc.returncode != 0:
+        err = [ln for ln in (proc.stderr or "").splitlines() if ln.strip()]
+        msg = err[-1] if err else f"kubectl exited with {proc.returncode}"
+        if "doesn't have a resource type" in msg or "the server could not find the requested resource" in msg:
+            return None, "clabernetes (0.7+, API group c9s.run) is not installed in this cluster"
+        return None, msg.removeprefix("error: ").removeprefix("Error from server ")
+    try:
+        data = json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        return None, "kubectl returned no JSON"
+    items = data.get("items") if isinstance(data, dict) else None
+    return (items if isinstance(items, list) else []), None
+
+
+def c9s_node(item):
+    meta, spec, status = item.get("metadata") or {}, item.get("spec") or {}, item.get("status") or {}
+    labels = meta.get("labels") or {}
+    # containerlab `labels` (graph-icon, graph-posX…) become the Node's
+    # metadata.labels (clabernetes >= 0.7); older manifests may keep them in spec.
+    node_labels = dict(spec.get("labels") if isinstance(spec.get("labels"), dict) else {}, **labels)
+    readiness = str(status.get("readiness") or "unknown")
+    role_label = node_labels.get("graph-icon", "")
+    role = ROLE_SVG_MAP.get(role_label) or ("bridge" if spec.get("kind") in BRIDGE_KINDS else "pe")
+    mgmt = status.get("directManagement") or {}
+    # Why a node isn't ready: the first failing condition, like `kubectl describe`.
+    why = next(
+        (c.get("reason") or c.get("type") for c in status.get("conditions") or [] if c.get("status") == "False"),
+        "",
+    )
+    node = {
+        "name": labels.get(C9S_NODE) or meta.get("name", ""),
+        # namespace/deployment: what kubectl exec / logs need
+        "container": f"{meta.get('namespace', '')}/{meta.get('name', '')}",
+        "kind": str(spec.get("kind") or ""),
+        "image": str(spec.get("image") or ""),
+        "group": "",
+        "state": readiness,
+        "status": why,
+        "running": readiness == "ready",
+        "ipv4": strip_prefix_len(mgmt.get("ipv4")),
+        "ipv6": strip_prefix_len(mgmt.get("ipv6")),
+        "provider": "clabernetes",
+        "role": role,
+        "icon": node_icon(role, ""),
+    }
+    xy = label_position(node_labels)
+    if xy:
+        node["position"] = xy
+    return node
+
+
+def k8s_labs(conn, items):
+    """clabernetes objects → labs (one per Topology), tagged with the cluster."""
+    context = str(conn.get("context") or "")
+    host = conn.get("group") or conn["name"]
+    topos, nodes, links = {}, {}, {}
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        meta = item.get("metadata") or {}
+        ns = meta.get("namespace", "")
+        if item.get("kind") == "Topology":
+            topos[(ns, meta.get("name", ""))] = item
+        elif item.get("kind") in ("Node", "Link"):
+            owner = (meta.get("labels") or {}).get(C9S_OWNER, "")
+            (nodes if item["kind"] == "Node" else links).setdefault((ns, owner), []).append(item)
+    labs = []
+    for (ns, name), topo in sorted(topos.items()):
+        status = topo.get("status") or {}
+        lab_nodes = [c9s_node(n) for n in nodes.get((ns, name), [])]
+        state = str(status.get("topologyState") or "")
+        if status.get("error"):
+            state = f"{state or 'error'}: {status['error']}"
+        elif state == "deployfailed":
+            state = "deploy failed"
+        lab_links = []
+        for link in links.get((ns, name), []):
+            spec = link.get("spec") or {}
+            a, z = spec.get("endpointA") or {}, spec.get("endpointB") or {}
+            if a.get("nodeName") and z.get("nodeName"):
+                lab_links.append(
+                    {
+                        "a": a["nodeName"],
+                        "aIf": a.get("interfaceName", ""),
+                        "z": z["nodeName"],
+                        "zIf": z.get("interfaceName", ""),
+                    }
+                )
+        labs.append(
+            {
+                "id": f"remote:{conn['name']}:k8s:{ns}/{name}",
+                "name": name,
+                "clabName": name,
+                "managedBy": "containerlab",
+                "providers": ["clabernetes"],
+                "topologyFile": "",
+                "dir": "",
+                "owner": "",
+                "status": state,
+                "startedAt": (topo.get("metadata") or {}).get("creationTimestamp", ""),
+                "nodesKnown": bool(lab_nodes),
+                "nodes": lab_nodes,
+                "links": lab_links,
+                "remote": True,
+                "via": "k8s",
+                "conn": conn["name"],
+                "host": host,
+                "namespace": ns,
+                "k8sContext": context,
+            }
+        )
+    return labs
+
+
+def kubus_url(context, namespace, name):
+    """Kubus deep link to one Topology (kubus://r/<group>/<version>/<plural>?sel=ctx|ns|name)."""
+    import urllib.parse
+
+    sel = urllib.parse.quote(f"{context}|{namespace}|{name}", safe="")
+    return f"kubus://r/{C9S_GROUP}/{C9S_VERSION}/topologies?sel={sel}"
+
+
+def kubus_app(which=shutil.which, platform=sys.platform, isdir=os.path.isdir, env=None):
+    """argv prefix that hands Kubus a kubus:// URL, or None when it isn't installed.
+    Linux / Windows: the executable takes the URL as an argument (a running
+    instance gets it too). macOS: `open <url>` through the app's URL scheme."""
+    env = os.environ if env is None else env
+    if platform == "darwin":
+        apps = ["/Applications/Kubus.app", os.path.expanduser("~/Applications/Kubus.app")]
+        return ["open"] if any(isdir(a) for a in apps) else None
+    exe = which("kubus") or which("Kubus")
+    if not exe and platform == "win32" and env.get("LOCALAPPDATA"):
+        for folder in ("kubus", "Kubus"):
+            candidate = os.path.join(env["LOCALAPPDATA"], "Programs", folder, "kubus.exe")
+            if os.path.isfile(candidate):
+                exe = candidate
+                break
+    return [exe] if exe else None
+
+
+def k8s_shell_plan(conn, mode, kind, container, env=None):
+    """kubectl exec / logs on a clabernetes node; container = namespace/deployment."""
+    env = os.environ if env is None else env
+    ns, _, deploy = container.partition("/")
+    if not ns or not deploy:
+        return None
+    base = kubectl_argv(conn) + ["-n", ns]
+    if mode == "exec":
+        key = kind.upper().replace("-", "_")
+        cmd = env.get(f"CLAB_WIDGET_EXEC_{key}") or EXEC_CMD.get(kind)
+        tail = cmd.split() if cmd else ["sh", "-c", "command -v bash >/dev/null && exec bash || exec sh"]
+        return base + ["exec", "-it", f"deploy/{deploy}", "--", *tail]
+    if mode == "logs":
+        return base + ["logs", "-f", "--tail", "200", f"deploy/{deploy}"]
+    return None
+
+
+def k8s_stop_plan(conn, lab):
+    """Delete the Topology (clabernetes then removes its Nodes, Pods, Services)."""
+    return kubectl_argv(conn) + ["-n", lab["namespace"], "delete", f"topologies.{C9S_GROUP}", lab["name"]]
+
+
+def collect_remotes(conns, tokens, fetch_clab=None, fetch_nl=None, fetch_sh=None, details=False, fetch_kube=None):
     """[(connection name, labs, error)]. Connections sharing a "group" are one
     machine: its netlab-ui instances merge into its clab-api labs by directory,
-    so a netlab lab on containerlab is one card there too."""
+    so a netlab lab on containerlab is one card there too. ssh hosts are
+    fetched in parallel (each one is a round trip plus the tools' own time)."""
     fetch_clab = fetch_clab or fetch_remote
     fetch_nl = fetch_nl or fetch_netlab_ui
+    fetch_sh = fetch_sh or fetch_ssh
+    fetch_kube = fetch_kube or fetch_k8s
+    ssh_conns = [c for c in conns if c.get("type") in HOST_TYPES]
+    k8s_conns = [c for c in conns if c.get("type") == "k8s"]
+    slow = {}
+    if ssh_conns or k8s_conns:
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(max_workers=min(8, len(ssh_conns) + len(k8s_conns))) as pool:
+            futures = {c["name"]: pool.submit(fetch_sh, c, details) for c in ssh_conns}
+            futures.update({c["name"]: pool.submit(fetch_kube, c) for c in k8s_conns})
+            slow = {name: f.result() for name, f in futures.items()}
     results, groups = [], {}
+    for conn in ssh_conns:
+        snap, err = slow[conn["name"]]
+        labs = ssh_labs(conn, snap) if snap else []
+        results.append((conn["name"], labs, err or (ssh_source_error(snap) if snap is not None else None)))
+    for conn in k8s_conns:
+        items, err = slow[conn["name"]]
+        results.append((conn["name"], k8s_labs(conn, items) if items is not None else [], err))
     for conn in conns:
         if conn.get("type", "clab-api") == "clab-api":
             labs, err = fetch_clab(conn, tokens)
@@ -471,11 +878,45 @@ def cmd_login(args):
     """
     import getpass
 
-    flags = {"--insecure"}
+    if "--terminal" in args:
+        return login_in_terminal(args)
+    flags = {"--insecure", "--terminal"}
+    valued = {"--ca", "--identity", "--group", "--kubeconfig"}
     ca = flag_value(args, "--ca")
-    pos = [a for i, a in enumerate(args) if a not in flags and a != "--ca" and (i == 0 or args[i - 1] != "--ca")]
+    pos = [a for i, a in enumerate(args) if a not in flags | valued and (i == 0 or args[i - 1] not in valued)]
     if not pos:
         return usage()
+    if len(pos) >= 2 and pos[1].startswith("k8s://"):
+        context, _, namespace = pos[1][6:].strip("/").partition("/")
+        conn = {"name": pos[0], "type": "k8s"}
+        if context:
+            conn["context"] = context
+        if namespace:
+            conn["namespace"] = namespace
+        if flag_value(args, "--kubeconfig"):
+            conn["kubeconfig"] = flag_value(args, "--kubeconfig")
+        ok, err = login(conn, "")
+        print(f"added {conn['name']}" if ok else f"not added: {err}", file=sys.stdout if ok else sys.stderr)
+        return 0 if ok else 1
+    if len(pos) >= 2 and pos[1].startswith("wsl://"):
+        conn = {"name": pos[0], "type": "wsl"}
+        if pos[1][6:].strip("/"):
+            conn["distro"] = pos[1][6:].strip("/")
+        ok, err = login(conn, "")
+        print(f"added {conn['name']}" if ok else f"not added: {err}", file=sys.stdout if ok else sys.stderr)
+        return 0 if ok else 1
+    if len(pos) >= 2 and pos[1].startswith("ssh://"):
+        conn = parse_ssh_url(pos[0], pos[1])
+        if conn is None:
+            print(f"bad ssh address {pos[1]!r}; use ssh://[user@]host[:port]", file=sys.stderr)
+            return 2
+        if flag_value(args, "--identity"):
+            conn["identity"] = flag_value(args, "--identity")
+        if flag_value(args, "--group"):
+            conn["group"] = flag_value(args, "--group")
+        ok, err = login(conn, "")
+        print(f"added {conn['name']}" if ok else f"not added: {err}", file=sys.stdout if ok else sys.stderr)
+        return 0 if ok else 1
     conns = load_connections()
     conn = next((c for c in conns if c["name"] == pos[0]), None)
     if len(pos) >= 3:
@@ -492,10 +933,37 @@ def cmd_login(args):
     return 0
 
 
-def login(conn, password):
+def parse_ssh_url(name, url):
+    """ssh://[user@]host[:port] → connection dict, or None."""
+    m = re.fullmatch(r"ssh://(?:([^@/\s:]+)@)?([A-Za-z0-9._-]+|\[[0-9A-Fa-f:]+\])(?::(\d{1,5}))?/?", url.strip())
+    if not m or m.group(2).startswith("-"):
+        return None
+    conn = {"name": name, "type": "ssh", "host": (m.group(1) + "@" if m.group(1) else "") + m.group(2).strip("[]")}
+    if m.group(3) and m.group(3) != "22":
+        conn["port"] = int(m.group(3))
+    return conn
+
+
+def login(conn, password, fetch_sh=None, fetch_kube=None):
     """Trade a password for a token and save connection + token (not the
-    password). Adds or replaces the connection by name. → (ok, error)."""
-    if conn.get("type", "clab-api") != "clab-api":
+    password). Adds or replaces the connection by name. → (ok, error).
+    ssh hosts have no password here: one test snapshot must work (key login)."""
+    if conn.get("type") == "k8s":
+        if not valid_connection(conn):
+            return False, "bad context / namespace"
+        _items, err = (fetch_kube or fetch_k8s)(conn)
+        if err:
+            return False, err
+        token = None
+    elif conn.get("type") in HOST_TYPES:
+        if not valid_connection(conn):
+            return False, "host missing"
+        snap, err = (fetch_sh or fetch_ssh)(conn)
+        if snap is None:
+            hint = " (needs key login: ssh-copy-id, or set an identity file)" if err.startswith("ssh: ") else ""
+            return False, err + hint
+        token = None
+    elif conn.get("type", "clab-api") != "clab-api":
         token = None  # netlab-ui has no login; just save the connection
     else:
         status, data = api_request(
@@ -514,6 +982,62 @@ def login(conn, password):
         tokens[conn["name"]] = token
         save_tokens(tokens)
     return True, ""
+
+
+def cmd_connections(_args):
+    json.dump(load_connections(), sys.stdout)
+    sys.stdout.write("\n")
+    return 0
+
+
+ADD_KEYS = {
+    "name",
+    "type",
+    "host",
+    "port",
+    "identity",
+    "python",
+    "distro",
+    "context",
+    "namespace",
+    "kubeconfig",
+    "url",
+    "group",
+    "insecure",
+    "caFile",
+    "username",
+}
+
+
+def cmd_add(args):
+    """add '<json>': for frontends without a password field (Plasma,
+    Quickshell). ssh is tested first; a clab-api server needs `login`."""
+    try:
+        conn = json.loads(args[0]) if args else None
+    except json.JSONDecodeError:
+        conn = None
+    if not isinstance(conn, dict):
+        ok, msg = False, "bad connection"
+    else:
+        conn = {k: v for k, v in conn.items() if k in ADD_KEYS and v not in ("", None)}
+        if conn.get("type") not in (*HOST_TYPES, "k8s", "netlab-ui"):
+            ok, msg = False, "clab-api-server needs a password: clab-status login <name> <url> <user>"
+        elif not valid_connection(conn):
+            ok, msg = False, "name and host / http(s) url needed"
+        else:
+            ok, err = login(conn, "")
+            msg = f"added {conn['name']}" if ok else f"failed: {err}"
+    json.dump({"ok": ok, "message": msg}, sys.stdout)
+    sys.stdout.write("\n")
+    return 0 if ok else 1
+
+
+def login_in_terminal(args):
+    """The same login, in a terminal window, so getpass can ask there."""
+    rest = [a for a in args if a != "--terminal"]
+    argv = [sys.executable, os.path.abspath(__file__), "login", *rest]
+    script = '"$@" || true; printf "press Enter to close"; read _'
+    return 0 if open_terminal(["sh", "-c", script, "sh", *argv]) else 1
 
 
 def cmd_logout(args):
@@ -826,8 +1350,12 @@ def finish(lab):
 def node_access(lab, node):
     """How the user can get onto a node (buttons in the node row):
     "ssh" (clab ssh_config host), "connect" (`netlab connect`, any provider),
-    "exec" (docker shell) and "logs" (docker logs)."""
-    if lab.get("remote") or not node.get("running"):
+    "exec" (docker shell) and "logs" (docker logs). On an ssh host the same
+    commands run there, through ssh."""
+    if lab.get("via") == "k8s":
+        # kubectl exec / logs on the node's Deployment; logs help most when it's down.
+        return (["exec"] if node.get("running") else []) + ["logs"]
+    if (lab.get("remote") and lab.get("via") not in HOST_TYPES) or not node.get("running"):
         return []
     container_node = node.get("provider", "containerlab") == "containerlab"
     out = []
@@ -851,6 +1379,24 @@ def fingerprint(lab):
 def lab_actions(lab, which=shutil.which):
     """Actions the frontends may offer. The backend re-checks before acting."""
     acts = ["copy"]
+    if lab.get("via") == "k8s":
+        if kubus_app(which):
+            acts.append("open")
+        if lab["nodesKnown"]:
+            acts.append("shell")
+        acts.append("stop")
+        return acts
+    if lab.get("via") in HOST_TYPES:
+        # VS Code Remote-SSH / WSL opens the lab folder on the host.
+        if lab.get("dir") and any(which(b) for b in EDITOR_BINS):
+            acts.append("open")
+        if lab["nodesKnown"]:
+            acts.append("shell")
+        if (lab["managedBy"] == "containerlab" and lab.get("topologyFile")) or (
+            lab["managedBy"] == "netlab" and lab.get("dir")
+        ):
+            acts.append("stop")
+        return acts
     if lab.get("remote"):
         if lab.get("uiUrl") or (lab["managedBy"] == "containerlab" and any(which(b) for b in CLAB_DESKTOP_BINS)):
             acts.append("open")
@@ -949,7 +1495,7 @@ def take_snapshot(args):
 
     remotes = []
     if "--no-remote" not in args and not (clab_file or netlab_file):
-        remotes = collect_remotes(load_connections(), load_tokens())
+        remotes = collect_remotes(load_connections(), load_tokens(), details="--details" in args)
 
     return build_snapshot(clab_data, clab_error, netlab_data, netlab_error, enabled, details, remotes)
 
@@ -1065,8 +1611,50 @@ def remote_open_plan(managed_by, ui_url, which):
     return None
 
 
+def ssh_open_plan(conn, lab_dir, which):
+    """VS Code (or VSCodium) Remote-SSH / WSL on the lab folder. A custom port
+    or identity file must come from ~/.ssh/config: VS Code takes only a host."""
+    if conn.get("type") == "wsl":
+        authority = "wsl+" + (conn.get("distro") or "")
+    else:
+        authority = f"ssh-remote+{conn['host']}"
+    for b in EDITOR_BINS:
+        exe = which(b)
+        if exe and lab_dir:
+            return [exe, "--remote", authority, lab_dir]
+    return None
+
+
+def current_context(conn):
+    """Kubus selections name the context; an empty one means kubectl's current."""
+    try:
+        proc = subprocess.run(
+            kubectl_argv(conn) + ["config", "current-context"], capture_output=True, text=True, timeout=5
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    return proc.stdout.strip()
+
+
+def find_connection(name):
+    return next((c for c in load_connections() if c["name"] == name), None)
+
+
 def cmd_open(args):
-    """open <managedBy> <topologyFile> <labDir> [--remote [--ui URL]]"""
+    """open <managedBy> <topologyFile> <labDir> [--remote [--ui URL]] [--via CONN]"""
+    if "--via" in args:
+        conn = find_connection(flag_value(args, "--via") or "")
+        if conn and conn.get("type") == "k8s":
+            # open containerlab <topology name> <namespace> --via <cluster>
+            app = kubus_app()
+            argv = app + [kubus_url(conn.get("context") or current_context(conn), args[2], args[1])] if app else None
+            if argv:
+                spawn(argv)
+            return 0 if argv else 1
+        argv = ssh_open_plan(conn, args[2] if len(args) > 2 else "", shutil.which) if conn else None
+        if argv:
+            spawn(argv)
+        return 0 if argv else 1
     if "--remote" in args:
         argv = remote_open_plan(args[0] if args else "", flag_value(args, "--ui"), shutil.which)
         if argv:
@@ -1102,6 +1690,8 @@ TERMINALS = [
 
 
 def find_terminal():
+    """Linux terminal emulator argv prefix, or None (see open_terminal for
+    Windows / macOS)."""
     preferred = os.environ.get("TERMINAL", "")
     for exe, prefix in TERMINALS:
         if preferred and os.path.basename(preferred) == exe and shutil.which(preferred):
@@ -1111,6 +1701,40 @@ def find_terminal():
         if path:
             return [path] + prefix
     return None
+
+
+def terminal_plan(argv, platform=sys.platform, find=None):
+    """How to show argv in a new terminal window → (argv, creationflags) or None.
+    Windows: a new console window. macOS: Terminal.app via osascript."""
+    if platform == "win32":
+        return argv, 0x00000010  # CREATE_NEW_CONSOLE
+    if platform == "darwin":
+        cmd = shlex.join(argv).replace("\\", "\\\\").replace('"', '\\"')
+        script = f'tell application "Terminal"\n  do script "{cmd}"\n  activate\nend tell'
+        return ["osascript", "-e", script], 0
+    term = (find or find_terminal)()
+    return (term + argv, 0) if term else None
+
+
+def open_terminal(argv):
+    """Run argv in a new terminal window; False if there is none."""
+    plan = terminal_plan(argv)
+    if plan is None:
+        return False
+    argv, flags = plan
+    if flags:
+        subprocess.Popen(argv, stdin=subprocess.DEVNULL, creationflags=flags)
+    else:
+        spawn(argv)
+    return True
+
+
+def ssh_shell_plan(conn, mode, kind, container, node="", lab_dir="", env=None):
+    """Node terminal on an ssh host: the local plan's command, run there."""
+    argv = shell_plan(mode, kind, container, node, lab_dir, env=env, which=lambda _b: None)
+    if argv is None:
+        return None
+    return host_argv(conn, shlex.join(argv), interactive=True)
 
 
 def shell_plan(mode, kind, container, node="", lab_dir="", env=None, which=shutil.which):
@@ -1135,8 +1759,20 @@ def shell_plan(mode, kind, container, node="", lab_dir="", env=None, which=shuti
 
 
 def cmd_shell(args):
-    """shell <ssh|connect|exec|logs> <kind> <container> [<node> <labDir>]
+    """shell <ssh|connect|exec|logs> <kind> <container> [<node> <labDir>] [--via CONN]
     (old form: shell <kind> <container> → ssh, or exec for plain containers)"""
+    via = flag_value(args, "--via")
+    if via is not None:
+        i = args.index("--via")
+        args = args[:i] + args[i + 2 :]
+        conn = find_connection(via)
+        if conn is None or len(args) < 3:
+            return usage() if conn else 1
+        argv = k8s_shell_plan(conn, *args[:3]) if conn.get("type") == "k8s" else ssh_shell_plan(conn, *args[:5])
+        if argv is None or not open_terminal(argv):
+            print("no terminal emulator found" if argv else f"unknown mode {args[0]}", file=sys.stderr)
+            return 1
+        return 0
     if len(args) == 2:
         args = ["exec" if args[0] in EXEC_KINDS else "ssh", *args]
     if len(args) < 3:
@@ -1145,11 +1781,9 @@ def cmd_shell(args):
     node = args[3] if len(args) > 3 else ""
     lab_dir = args[4] if len(args) > 4 else ""
     argv = shell_plan(mode, kind, container, node, lab_dir)
-    term = find_terminal()
-    if argv is None or term is None:
+    if argv is None or not open_terminal(argv):
         print("no terminal emulator found" if argv else f"unknown mode {mode}", file=sys.stderr)
         return 1
-    spawn(term + argv)
     return 0
 
 
@@ -1166,6 +1800,34 @@ def stop_plan(lab, which=shutil.which, in_admin_group=None):
         in_admin_group = getattr(os, "geteuid", lambda: -1)() == 0 or "clab_admins" in group_names()
     cmd = [clab, "destroy", "-t", lab["topologyFile"]]
     return (cmd if in_admin_group else ["sudo", *cmd]), os.path.dirname(lab["topologyFile"])
+
+
+HOLD = 'echo; printf "done — press Enter to close"; read _'
+
+
+def hold_open(argv, platform=sys.platform):
+    """argv run in a terminal that stays open afterwards, showing the command."""
+    if platform == "win32":
+        # cmd /k keeps the window. The program by bare name (it was found on
+        # PATH): a quoted first token makes cmd strip quotes around the line.
+        name = os.path.splitext(re.split(r"[\\/]", argv[0])[-1])[0]
+        return ["cmd", "/k", name, *argv[1:]]
+    return ["sh", "-c", 'echo "\\$ $*"; "$@"; ' + HOLD, "sh", *argv]
+
+
+def ssh_stop_plan(conn, lab):
+    """Stop on an ssh host, in a local terminal (sudo may ask there). The host
+    decides root / clab_admins / sudo itself, like stop_plan does locally."""
+    if lab["managedBy"] == "netlab":
+        script = f"cd {shlex.quote(lab['dir'])} && echo '$ netlab down' && netlab down"
+    else:
+        topo = shlex.quote(lab["topologyFile"])
+        script = (
+            f'cd "$(dirname {topo})"; C=$(command -v containerlab); echo "$ containerlab destroy -t "{topo}; '
+            'if [ "$(id -u)" = 0 ] || id -nG | grep -qw clab_admins; '
+            f'then "$C" destroy -t {topo}; else sudo "$C" destroy -t {topo}; fi'
+        )
+    return host_argv(conn, f"{script}; {HOLD}", interactive=True)
 
 
 def group_names():
@@ -1215,6 +1877,18 @@ def cmd_stop(args):
     if lab is None:
         cmd_notify(["Lab not stopped", f"{args[0].split(':')[-1]}: {reason}"])
         return 3
+    if lab.get("via") == "k8s":
+        conn = find_connection(lab.get("conn", ""))
+        if conn is None or not open_terminal(hold_open(k8s_stop_plan(conn, lab))):
+            cmd_notify([f"{lab['name']} not stopped", "connection missing" if conn is None else "no terminal found"])
+            return 1
+        return 0
+    if lab.get("via") in HOST_TYPES:
+        conn = find_connection(lab.get("conn", ""))
+        if conn is None or not open_terminal(ssh_stop_plan(conn, lab)):
+            cmd_notify([f"{lab['name']} not stopped", "connection missing" if conn is None else "no terminal found"])
+            return 1
+        return 0
     if lab.get("remote"):
         conn = next((c for c in load_connections() if c["name"] == lab.get("conn")), None)
         token = load_tokens().get(lab.get("conn", ""))
@@ -1226,13 +1900,11 @@ def cmd_stop(args):
         cmd_notify([title, f"on {lab['host']}" + (f": {detail}" if detail else "")])
         return 0 if ok else 1
     argv, cwd = stop_plan(lab)
-    term = find_terminal()
-    if term is None:
+    # A terminal, so sudo can prompt and the output stays readable.
+    script = r'cd "$1" 2>/dev/null; shift; echo "\$ $*"; "$@"; ' + HOLD
+    if not open_terminal(["sh", "-c", script, "sh", cwd or "/", *argv]):
         cmd_notify([f"{lab['name']} not stopped", "no terminal emulator found"])
         return 1
-    # A terminal, so sudo can prompt and the output stays readable.
-    script = r'cd "$1" 2>/dev/null; shift; echo "\$ $*"; "$@"; echo; printf "done — press Enter to close"; read _'
-    spawn(term + ["sh", "-c", script, "sh", cwd or "/", *argv])
     return 0
 
 
@@ -1289,6 +1961,10 @@ def main(argv):
         return cmd_login(rest)
     if cmd == "logout":
         return cmd_logout(rest)
+    if cmd == "connections":
+        return cmd_connections(rest)
+    if cmd == "add":
+        return cmd_add(rest)
     return usage()
 
 

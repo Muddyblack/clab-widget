@@ -77,7 +77,12 @@
         "hostUrl": { "type": "string" },
         "apiUrl": { "type": "string" },
         "uiUrl": { "type": "string" },
-        "conn": { "type": "string" }
+        "conn": { "type": "string" },
+        "via": { "enum": ["ssh", "wsl", "k8s"], "description": "ssh / wsl: collected by running clab-status on the host, and shell/stop/open go the same way. k8s: a clabernetes Topology read with kubectl." },
+        "sshHost": { "type": "string", "description": "ssh destination ([user@]host) of a via=ssh lab." },
+        "wslDistro": { "type": "string", "description": "WSL distribution of a via=wsl lab (empty = the default one)." },
+        "namespace": { "type": "string", "description": "Kubernetes namespace of a via=k8s (clabernetes) lab." },
+        "k8sContext": { "type": "string", "description": "kubectl context of a via=k8s lab (empty = the current one)." }
       }
     },
     "node": {
@@ -98,6 +103,7 @@
         "memoryBytes": { "type": ["integer", "null"], "minimum": 0 },
         "role": { "enum": ["pe", "dcgw", "leaf", "switch", "spine", "super-spine", "server", "pon", "controller", "rgw", "ue", "cloud", "client", "bridge"] },
         "icon": { "type": "string", "description": "Absolute path to the node's clab-ui role SVG." },
+        "iconColor": { "type": "string", "description": "Custom icon colour from the clab-ui annotations (icon is already recoloured)." },
         "position": {
           "type": "object",
           "required": ["x", "y"],

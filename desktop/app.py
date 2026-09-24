@@ -6,6 +6,9 @@ backend script, run with this interpreter. On Windows/macOS containerlab and
 netlab usually live on another machine: add it under "remote hosts".
 
   python desktop/app.py                     start (a second start toggles the popup)
+  python desktop/app.py --window            a normal window instead of a tray popup
+                                            (automatic when there is no system tray,
+                                            e.g. GNOME without the AppIndicator extension)
   python desktop/app.py --render OUT.png [--page labs|settings|connections]
                                             render the popup off-screen and exit
   python desktop/app.py --selftest          load the QML off-screen, open every page,
@@ -41,7 +44,7 @@ _spec = importlib.util.spec_from_loader("clab_status", _loader)
 cs = importlib.util.module_from_spec(_spec)
 _loader.exec_module(cs)
 
-from PySide6.QtCore import Property, QObject, QPoint, QRect, QSize, Qt, QTimer, Signal, Slot  # noqa: E402
+from PySide6.QtCore import Property, QObject, QPoint, QRect, QSize, Qt, QTimer, QUrl, Signal, Slot  # noqa: E402
 from PySide6.QtGui import QColor, QCursor, QGuiApplication, QIcon, QPainter  # noqa: E402
 from PySide6.QtNetwork import QLocalServer, QLocalSocket  # noqa: E402
 from PySide6.QtQuick import QQuickView  # noqa: E402
@@ -200,8 +203,7 @@ class Backend(QObject):
 
 
 def app_icon():
-    """All shipped sizes, so each platform picks a sharp one (the small ones
-    are the symbol without the "clab widget" text)."""
+    """All shipped sizes, so each platform picks a sharp one."""
     prefix = ICON_PREFIX.get(_icon_variant, ICON_PREFIX["clab"])
     icon = QIcon()
     for n in ICON_SIZES:
@@ -225,16 +227,18 @@ def tray_icon(attention, active):
 
 
 class App:
-    def __init__(self, qt_app, render_to=None, page="labs", headless=False):
+    def __init__(self, qt_app, render_to=None, page="labs", headless=False, windowed=False):
         self.qt_app = qt_app
+        self.windowed = windowed
         self.backend = Backend()
         self.view = QQuickView()
         self.view.setColor(Qt.transparent)
         self.view.rootContext().setContextProperty("backend", self.backend)
         self.view.rootContext().setContextProperty("initialPage", page)
         self.view.setResizeMode(QQuickView.SizeViewToRootObject)
-        self.view.setSource(os.path.join(HERE, "Main.qml"))
-        if self.view.status() == QQuickView.Error:
+        # A URL, not a path: "D:\a\Main.qml" would parse as scheme "d:" on Windows.
+        self.view.setSource(QUrl.fromLocalFile(os.path.join(HERE, "Main.qml")))
+        if self.view.status() != QQuickView.Ready:
             for e in self.view.errors():
                 print(e.toString(), file=sys.stderr)
             sys.exit(1)
@@ -244,6 +248,23 @@ class App:
             return
         if headless:
             self.view.show()
+            return
+
+        self.backend.trayStateChanged.connect(self._on_tray_state)
+        self.backend.appIconChanged.connect(self._on_app_icon)
+        self._last_totals = {}
+        self._hidden_at = 0
+        self.tray = None
+
+        if windowed:
+            # No tray to live in: an ordinary window. Closing it quits.
+            self.view.setTitle("CLAB Widget")
+            self.view.setIcon(app_icon())
+            self.backend.notifyRequested.connect(
+                lambda t, b: threading.Thread(target=run_tool, args=(["notify", t, b],), daemon=True).start()
+            )
+            qt_app.setQuitOnLastWindowClosed(True)
+            self.show_popup()
             return
 
         self.view.setFlags(Qt.Tool | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
@@ -263,12 +284,10 @@ class App:
         self.menu = menu
 
         self.backend.notifyRequested.connect(lambda t, b: self.tray.showMessage(t, b, app_icon(), 8000))
-        self.backend.trayStateChanged.connect(self._on_tray_state)
-        self.backend.appIconChanged.connect(self._on_app_icon)
-        self._last_totals = {}
-        self._hidden_at = 0
 
     def _render(self, path):
+        # Off-screen, a transparent window grabs as white: give it a backdrop.
+        self.view.setColor(QColor("#1d2233"))
         self.view.show()
 
         def grab():
@@ -280,13 +299,19 @@ class App:
     def _on_app_icon(self):
         self.qt_app.setWindowIcon(app_icon())
         t = self._last_totals
-        self.tray.setIcon(tray_icon(t.get("attention", 0) > 0, t.get("labs", 0) > 0))
+        if self.tray:
+            self.tray.setIcon(tray_icon(t.get("attention", 0) > 0, t.get("labs", 0) > 0))
+        else:
+            self.view.setIcon(app_icon())
 
     def _on_tray_state(self, totals_json, summary):
         t = json.loads(totals_json)
         self._last_totals = t
-        self.tray.setIcon(tray_icon(t.get("attention", 0) > 0, t.get("labs", 0) > 0))
-        self.tray.setToolTip(f"CLAB Widget — {summary}")
+        if self.tray:
+            self.tray.setIcon(tray_icon(t.get("attention", 0) > 0, t.get("labs", 0) > 0))
+            self.tray.setToolTip(f"CLAB Widget — {summary}")
+        else:
+            self.view.setTitle(f"CLAB Widget — {summary}")
 
     def _on_tray(self, reason):
         if reason in (QSystemTrayIcon.Trigger, QSystemTrayIcon.DoubleClick):
@@ -298,6 +323,9 @@ class App:
             self.hide_popup()
 
     def toggle_popup(self):
+        if self.windowed:
+            self.show_popup()  # a second start brings the window forward
+            return
         if self.view.isVisible():
             self.hide_popup()
         # Clicking the tray icon first deactivates (and so hides) an open
@@ -306,7 +334,8 @@ class App:
             self.show_popup()
 
     def show_popup(self):
-        self._reposition()
+        if not self.windowed:
+            self._reposition()
         self.view.show()
         self.view.raise_()
         self.view.requestActivate()
@@ -357,6 +386,14 @@ def selftest():
 
     def handler(kind, _ctx, msg):
         print(msg, file=sys.stderr)
+        # Avatars and badges on the info page come from GitHub: no network
+        # (a sandbox, a proxy) is not a QML problem.
+        if "Error transferring http" in msg:
+            return
+        # Font notes: a slow alias lookup (macOS), and the offscreen platform
+        # finding no font directory (Windows CI). Neither is a QML problem.
+        if msg.startswith(("Populating font family aliases", "QFontDatabase: Cannot find font directory")):
+            return
         # JS errors in bindings can arrive at any level; count them all.
         bad_kind = kind in (QtMsgType.QtWarningMsg, QtMsgType.QtCriticalMsg, QtMsgType.QtFatalMsg)
         if bad_kind or any(e in msg for e in ("TypeError", "ReferenceError", "Error:")):
@@ -382,7 +419,7 @@ def selftest():
     qt_app.exec()
     # Tear the QML down while the handler still listens: shutdown-time
     # binding errors count too.
-    app.view.setSource("")
+    app.view.setSource(QUrl())
     del app
     qt_app.processEvents()
     if problems:
@@ -414,11 +451,13 @@ def main():
             sock.write(b"toggle")
             sock.waitForBytesWritten(300)
             return 0
-        if not QSystemTrayIcon.isSystemTrayAvailable():
-            print("no system tray available", file=sys.stderr)
+    windowed = "--window" in sys.argv
+    if not render_to and not windowed and not QSystemTrayIcon.isSystemTrayAvailable():
+        print("no system tray available: opening a window instead", file=sys.stderr)
+        windowed = True
 
     page = sys.argv[sys.argv.index("--page") + 1] if "--page" in sys.argv else "labs"
-    app = App(qt_app, render_to, page)
+    app = App(qt_app, render_to, page, windowed=windowed)
 
     if not render_to:
         QLocalServer.removeServer(INSTANCE_KEY)

@@ -7,7 +7,7 @@ const assert = require("assert");
 
 // Labs.js is a QML JS library; drop the pragma and expose its functions.
 const src = fs.readFileSync(path.join(__dirname, "../package/contents/code/Labs.js"), "utf8").replace(/^\.pragma library$/m, "");
-const Labs = new Function(src + "; return { q, parse, summaryText, badgeText, lifecycleText, memoryText, bytes, newTracker, trackEvents, duration, layoutNodes, mapLayout, togglePin, pinnedSegments, segmentText, pinnedFirst, nameFromId, rowsFor, syncModel, visibleLabs, shownSnapshot, sourceArgs };")();
+const Labs = new Function(src + "; return { q, parse, summaryText, badgeText, lifecycleText, memoryText, bytes, newTracker, trackEvents, duration, layoutNodes, mapLayout, togglePin, pinnedSegments, segmentText, pinnedFirst, nameFromId, rowsFor, syncModel, visibleLabs, shownSnapshot, sourceArgs, openArgs, shellArgs, fileUrl };")();
 
 let failed = 0;
 function test(name, fn) {
@@ -320,6 +320,45 @@ test("search 'down' finds non-running nodes, state/status searchable", () => {
         nodes: [{name: "n1", kind: "srl", running: true, state: "running"}, {name: "n2", kind: "srl", running: false, state: "exited", status: "Exited (137)"}]}]};
     assert.deepStrictEqual(Labs.rowsFor(s, {query: "down"}).rows.map(r => r.key), ["La", "Na/n2"]);
     assert.deepStrictEqual(Labs.rowsFor(s, {query: "137"}).rows.map(r => r.key), ["La", "Na/n2"]);
+});
+
+test("map: mostly placed labs keep their layout, new nodes go below", () => {
+    const nodes = [
+        {name: "s1", role: "spine", position: {x: 0, y: 0}},
+        {name: "s2", role: "spine", position: {x: 200, y: 0}},
+        {name: "l1", role: "leaf", position: {x: 0, y: 100}},
+        {name: "new", role: "leaf"}
+    ];
+    const m = Labs.mapLayout(nodes, 480);
+    assert.ok(m.pos.s2.x > m.pos.s1.x);
+    assert.ok(m.pos.l1.y > m.pos.s1.y);
+    assert.ok(m.pos.new.y > m.pos.l1.y, JSON.stringify(m.pos));
+    assert.strictEqual(nodes[3].position, undefined); // input untouched
+    // Under half placed: tiers, as before.
+    const few = [{name: "a", role: "spine", position: {x: 0, y: 0}}, {name: "b", role: "leaf"}, {name: "c", role: "leaf"}];
+    const t = Labs.mapLayout(few, 480);
+    assert.ok(t.pos.b.y > t.pos.a.y);
+});
+
+test("fileUrl: POSIX and Windows paths", () => {
+    assert.strictEqual(Labs.fileUrl("/nix/store/x/icons/nodes/pe.svg"), "file:///nix/store/x/icons/nodes/pe.svg");
+    assert.strictEqual(Labs.fileUrl("C:\\Users\\me\\AppData\\pe.svg"), "file:///C:/Users/me/AppData/pe.svg");
+    assert.strictEqual(Labs.fileUrl("/home/me/my labs/a b.svg"), "file:///home/me/my%20labs/a%20b.svg");
+    assert.strictEqual(Labs.fileUrl(""), "");
+});
+
+test("open/shell args: local, API remote, ssh host", () => {
+    const node = {name: "s1", kind: "nokia_srlinux", container: "clab-fab-s1"};
+    const local = {managedBy: "containerlab", topologyFile: "/l/fab.clab.yml", dir: "/l"};
+    assert.deepStrictEqual(Labs.openArgs(local), ["open", "containerlab", "/l/fab.clab.yml", "/l"]);
+    assert.deepStrictEqual(Labs.shellArgs(local, node, "exec"), ["shell", "exec", "nokia_srlinux", "clab-fab-s1", "s1", "/l"]);
+    const api = {managedBy: "netlab", remote: true, uiUrl: "http://srv:8000"};
+    assert.deepStrictEqual(Labs.openArgs(api), ["open", "netlab", "", "", "--remote", "--ui", "http://srv:8000"]);
+    const ssh = Object.assign({remote: true, via: "ssh", conn: "box"}, local);
+    assert.deepStrictEqual(Labs.openArgs(ssh), ["open", "containerlab", "/l/fab.clab.yml", "/l", "--via", "box"]);
+    assert.deepStrictEqual(Labs.shellArgs(ssh, node, "ssh").slice(-2), ["--via", "box"]);
+    const wsl = Object.assign({}, ssh, {via: "wsl", conn: "wsl"});
+    assert.deepStrictEqual(Labs.shellArgs(wsl, node, "exec").slice(-2), ["--via", "wsl"]);
 });
 
 if (failed) {

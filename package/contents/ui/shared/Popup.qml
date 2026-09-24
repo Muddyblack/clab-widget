@@ -37,6 +37,8 @@ Item {
     signal refreshRequested
 
     property string page: "list" // list | map | settings | extra
+    // The settings subtab (labs | alerts | look | placement | info).
+    property alias settingsTab: settingsPage.currentTab
     property string mapLabId: ""
     property bool searchOpen: false
     property string query: ""
@@ -79,7 +81,9 @@ Item {
     }
 
     implicitWidth: 500
-    implicitHeight: header.height + extras.implicitHeight + bodyHeight + 16
+    // Everything the column below lays out: its margins, 8 px between items,
+    // and the chips/notices block only on the list page.
+    implicitHeight: 2 * (framed ? 14 : 8) + header.height + 8 + (extras.visible ? extras.implicitHeight + 8 : 0) + bodyHeight
 
     onModelChanged: Labs.syncModel(rows, model.rows)
 
@@ -96,7 +100,7 @@ Item {
             mapLabId = lab.id;
             page = "map";
         } else if (name === "open")
-            run(lab.remote ? ["open", lab.managedBy, "", "", "--remote", "--ui", lab.uiUrl || ""] : ["open", lab.managedBy, lab.topologyFile || "", lab.dir || ""]);
+            run(Labs.openArgs(lab));
         else if (name === "pin")
             cfg.pinned = Labs.togglePin(pins, lab.id);
         else if (name === "copy-path")
@@ -115,7 +119,7 @@ Item {
         else if (name === "copy-container")
             clipboard.put(node.container);
         else
-            run(["shell", name, node.kind, node.container, node.name, lab.dir || ""]);
+            run(Labs.shellArgs(lab, node, name));
     }
 
     function labMenu(lab, x, y) {
@@ -136,7 +140,7 @@ Item {
         if (acts.indexOf("open") >= 0)
             items.push({
                 icon: "external-link",
-                text: lab.remote ? "Open in app" : "Open (app / VS Code)",
+                text: lab.via === "k8s" ? "Open in Kubus" : lab.via === "ssh" ? "Open in VS Code (Remote-SSH)" : lab.via === "wsl" ? "Open in VS Code (WSL)" : (lab.remote ? "Open in app" : "Open (app / VS Code)"),
                 action: "open"
             });
         items.push({
@@ -161,7 +165,7 @@ Item {
                 separator: true
             }, {
                 icon: "square",
-                text: lab.managedBy === "netlab" ? "Stop (netlab down)…" : "Destroy…",
+                text: lab.managedBy === "netlab" ? "Stop (netlab down)…" : lab.via === "k8s" ? "Delete topology…" : "Destroy…",
                 action: "stop",
                 danger: true
             });
@@ -424,7 +428,7 @@ Item {
                     anchors.rightMargin: 6
                     Text {
                         Layout.fillWidth: true
-                        text: popup.confirm ? (popup.confirm.managedBy === "netlab" ? "netlab down " : "Destroy ") + popup.confirm.name + "?" : ""
+                        text: popup.confirm ? (popup.confirm.managedBy === "netlab" ? "netlab down " : popup.confirm.via === "k8s" ? "Delete topology " : "Destroy ") + popup.confirm.name + (popup.confirm.via === "k8s" ? " (" + popup.confirm.namespace + ")?" : "?") : ""
                         color: popup.theme.text
                         font.pixelSize: popup.theme.fontSize
                         elide: Text.ElideRight
@@ -531,6 +535,14 @@ Item {
                     font.pixelSize: popup.theme.fontSize
                     clip: true
                     onTextChanged: popup.query = text
+                    // A query set from outside (IPC, renders) shows up here too.
+                    Connections {
+                        target: popup
+                        function onQueryChanged() {
+                            if (searchInput.text !== popup.query)
+                                searchInput.text = popup.query;
+                        }
+                    }
                     Keys.onEscapePressed: {
                         text = "";
                         popup.searchOpen = false;

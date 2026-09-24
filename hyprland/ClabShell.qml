@@ -88,6 +88,78 @@ ShellRoot {
         Quickshell.execDetached(["sh", root.runTool].concat(args));
     }
 
+    // Remote hosts page: list / add (ssh, netlab-ui) / remove through the
+    // backend; a clab-api-server login asks for its password in a terminal.
+    property var connections: []
+    property string connStatus: ""
+    property bool connBusy: false
+
+    function connCall(args) {
+        if (connProc.running)
+            return;
+        connProc.command = ["sh", root.runTool].concat(args);
+        connProc.running = true;
+    }
+    function loadConnections() {
+        connCall(["connections"]);
+    }
+    function addConnection(conn) {
+        if (conn.type === "clab-api") {
+            var args = ["login", conn.name, conn.url, conn.username || "", "--terminal"];
+            if (conn.insecure)
+                args.push("--insecure");
+            root.runAction(args);
+            root.connStatus = "log in in the terminal window, then refresh";
+            return;
+        }
+        root.connBusy = true;
+        root.connStatus = "";
+        connCall(["add", JSON.stringify(conn)]);
+    }
+
+    Process {
+        id: connProc
+        stdout: StdioCollector {
+            onStreamFinished: {
+                var out = null;
+                try {
+                    out = JSON.parse(this.text);
+                } catch (e) {}
+                if (Array.isArray(out)) {
+                    root.connections = out;
+                    return;
+                }
+                if (out && out.message !== undefined) {
+                    root.connBusy = false;
+                    root.connStatus = out.message;
+                }
+                reloadConnections.start();
+                root.refresh();
+            }
+        }
+    }
+
+    Timer {
+        id: reloadConnections
+        interval: 50
+        onTriggered: root.loadConnections()
+    }
+
+    Component {
+        id: connectionsPage
+        ConnectionsPage {
+            showHeader: false
+            passwordLogin: false
+            theme: root.theme
+            connections: root.connections
+            status: root.connStatus
+            busy: root.connBusy
+            onAddRequested: (conn, _password) => root.addConnection(conn)
+            onRemoveRequested: name => root.connCall(["logout", name, "--forget"])
+            Component.onCompleted: root.loadConnections()
+        }
+    }
+
     function notifyChanges(snap) {
         var r = Labs.trackEvents(root.tracker, snap, {
             notifyNodeDown: cfg.notifyNodeDown,
@@ -306,6 +378,8 @@ ShellRoot {
                         stopRefresh.restart();
                 }
                 onRefreshRequested: root.refresh()
+                extraTitle: "Remote hosts"
+                extraPage: connectionsPage
             }
         }
     }
@@ -354,6 +428,8 @@ ShellRoot {
                     stopRefresh.restart();
             }
             onRefreshRequested: root.refresh()
+            extraTitle: "Remote hosts"
+            extraPage: connectionsPage
         }
     }
 }

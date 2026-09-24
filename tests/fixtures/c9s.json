@@ -1,0 +1,234 @@
+{
+ "apiVersion": "v1",
+ "kind": "List",
+ "items": [
+  {
+   "apiVersion": "c9s.run/v1alpha1",
+   "kind": "Topology",
+   "metadata": {
+    "name": "srl02",
+    "namespace": "c9s-srl02",
+    "creationTimestamp": "2026-09-24T08:00:00Z"
+   },
+   "spec": {
+    "definition": {
+     "containerlab": "name: srl02"
+    }
+   },
+   "status": {
+    "kind": "containerlab",
+    "nodeCount": 3,
+    "readyNodeCount": 2,
+    "topologyReady": false,
+    "topologyState": "degraded",
+    "conditions": []
+   }
+  },
+  {
+   "apiVersion": "c9s.run/v1alpha1",
+   "kind": "Node",
+   "metadata": {
+    "name": "srl1",
+    "namespace": "c9s-srl02",
+    "labels": {
+     "c9s.run/topologyOwner": "srl02",
+     "c9s.run/topologyNode": "srl1",
+     "graph-icon": "spine"
+    }
+   },
+   "spec": {
+    "kind": "nokia_srlinux",
+    "image": "ghcr.io/nokia/srlinux:25.3.1"
+   },
+   "status": {
+    "readiness": "ready",
+    "conditions": [
+     {
+      "type": "PlanApplied",
+      "status": "True",
+      "reason": "Applied"
+     },
+     {
+      "type": "ContainersReady",
+      "status": "True",
+      "reason": "ContainersReady"
+     }
+    ],
+    "directManagement": {
+     "interfaceName": "mgmt0",
+     "ipv4": "10.123.0.11/24"
+    }
+   }
+  },
+  {
+   "apiVersion": "c9s.run/v1alpha1",
+   "kind": "Node",
+   "metadata": {
+    "name": "srl2",
+    "namespace": "c9s-srl02",
+    "labels": {
+     "c9s.run/topologyOwner": "srl02",
+     "c9s.run/topologyNode": "srl2",
+     "graph-icon": "leaf"
+    }
+   },
+   "spec": {
+    "kind": "nokia_srlinux",
+    "image": "ghcr.io/nokia/srlinux:25.3.1"
+   },
+   "status": {
+    "readiness": "ready",
+    "conditions": [
+     {
+      "type": "PlanApplied",
+      "status": "True",
+      "reason": "Applied"
+     },
+     {
+      "type": "ContainersReady",
+      "status": "True",
+      "reason": "ContainersReady"
+     }
+    ],
+    "directManagement": {
+     "interfaceName": "mgmt0",
+     "ipv4": "10.123.0.12/24"
+    }
+   }
+  },
+  {
+   "apiVersion": "c9s.run/v1alpha1",
+   "kind": "Node",
+   "metadata": {
+    "name": "client1",
+    "namespace": "c9s-srl02",
+    "labels": {
+     "c9s.run/topologyOwner": "srl02",
+     "c9s.run/topologyNode": "client1"
+    }
+   },
+   "spec": {
+    "kind": "linux",
+    "image": "alpine:3",
+    "labels": {
+     "graph-icon": "client"
+    }
+   },
+   "status": {
+    "readiness": "notready",
+    "conditions": [
+     {
+      "type": "PlanApplied",
+      "status": "True",
+      "reason": "Applied"
+     },
+     {
+      "type": "ContainersReady",
+      "status": "False",
+      "reason": "CrashLoopBackOff"
+     }
+    ],
+    "directManagement": {
+     "interfaceName": "mgmt0",
+     "ipv4": "10.123.0.13/24"
+    }
+   }
+  },
+  {
+   "apiVersion": "c9s.run/v1alpha1",
+   "kind": "Link",
+   "metadata": {
+    "name": "srl1-e1-1--srl2-e1-1",
+    "namespace": "c9s-srl02",
+    "labels": {
+     "c9s.run/topologyOwner": "srl02"
+    }
+   },
+   "spec": {
+    "endpointA": {
+     "nodeName": "srl1",
+     "interfaceName": "e1-1"
+    },
+    "endpointB": {
+     "nodeName": "srl2",
+     "interfaceName": "e1-1"
+    }
+   },
+   "status": {
+    "wireID": 1
+   }
+  },
+  {
+   "apiVersion": "c9s.run/v1alpha1",
+   "kind": "Link",
+   "metadata": {
+    "name": "srl2-e1-2--client1-eth1",
+    "namespace": "c9s-srl02",
+    "labels": {
+     "c9s.run/topologyOwner": "srl02"
+    }
+   },
+   "spec": {
+    "endpointA": {
+     "nodeName": "srl2",
+     "interfaceName": "e1-2"
+    },
+    "endpointB": {
+     "nodeName": "client1",
+     "interfaceName": "eth1"
+    }
+   },
+   "status": {
+    "wireID": 1
+   }
+  },
+  {
+   "apiVersion": "c9s.run/v1alpha1",
+   "kind": "Topology",
+   "metadata": {
+    "name": "evpn",
+    "namespace": "lab-b",
+    "creationTimestamp": "2026-09-24T08:00:00Z"
+   },
+   "spec": {
+    "definition": {
+     "containerlab": "name: evpn"
+    }
+   },
+   "status": {
+    "kind": "containerlab",
+    "nodeCount": 4,
+    "readyNodeCount": 0,
+    "topologyReady": false,
+    "topologyState": "deploying",
+    "conditions": []
+   }
+  },
+  {
+   "apiVersion": "c9s.run/v1alpha1",
+   "kind": "Topology",
+   "metadata": {
+    "name": "broken",
+    "namespace": "lab-c",
+    "creationTimestamp": "2026-09-24T08:00:00Z"
+   },
+   "spec": {
+    "definition": {
+     "containerlab": "name: broken"
+    }
+   },
+   "status": {
+    "kind": "containerlab",
+    "nodeCount": 0,
+    "readyNodeCount": 0,
+    "topologyReady": false,
+    "topologyState": "",
+    "conditions": [],
+    "error": "node name srl1 conflicts with topology srl02"
+   }
+  }
+ ],
+ "metadata": {
+  "resourceVersion": ""
+ }
+}

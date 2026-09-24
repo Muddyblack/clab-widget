@@ -72,6 +72,7 @@ Rectangle {
 
         Text {
             Layout.fillWidth: true
+            Layout.minimumWidth: Math.min(implicitWidth, 90)
             text: row.lab.name
             color: row.theme.text
             opacity: 0.9
@@ -89,12 +90,20 @@ Rectangle {
         }
 
         Image {
+            visible: row.lab.via !== "k8s"
             Layout.preferredWidth: 15
             Layout.preferredHeight: 15
             sourceSize: Qt.size(30, 30)
             fillMode: Image.PreserveAspectFit
             source: Qt.resolvedUrl("../../icons/" + row.lab.managedBy + ".svg")
             opacity: 0.9
+        }
+        // clabernetes: containerlab on Kubernetes (the helm wheel stands for k8s).
+        Icon {
+            visible: row.lab.via === "k8s"
+            name: "ship-wheel"
+            size: 14
+            color: Theme.accent(row.theme, row.lab.managedBy)
         }
 
         Text {
@@ -107,6 +116,9 @@ Rectangle {
         // The headline reading: "6/7" bold in the state colour (text for
         // labs without node counts, e.g. netlab still starting).
         Text {
+            // A long status (a clabernetes error) elides here, not the lab name.
+            Layout.maximumWidth: row.width * 0.38
+            elide: Text.ElideRight
             text: row.lab.nodesKnown && row.lab.total > 0 ? row.lab.running + "/" + row.lab.total : Labs.lifecycleText(row.lab)
             color: Labs.lifecycleColor(row.theme, row.lab.lifecycle)
             font.pixelSize: row.lab.nodesKnown && row.lab.total > 0 ? row.theme.fontSize + 1 : row.theme.smallSize

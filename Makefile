@@ -1,4 +1,4 @@
-.PHONY: help view view-h view-hyprland hyprland install test test-py test-js lint format pack run-desktop demo icons app-icons tag
+.PHONY: help view view-h view-hyprland hyprland install install-desktop screenshots sync-upstream test test-py test-js lint format pack run-desktop demo icons app-icons tag
 .DEFAULT_GOAL := help
 
 help: ## list targets
@@ -33,6 +33,15 @@ run-desktop: ## run the tray app (the Windows/macOS frontend) on this machine
 	else \
 	  python3 desktop/app.py; \
 	fi
+
+install-desktop: ## menu entry + autostart for the tray app (GNOME, XFCE, … any Linux desktop)
+	@./desktop/install-linux.sh --autostart
+
+sync-upstream: ## pull clab-ui's node icons + role map and the VS Code extension's per-kind tables (git, node >= 22.6)
+	@python3 tools/sync-upstream.py
+
+screenshots: ## re-render the README images (docs/readme/*.png) from the demo labs (needs PySide6)
+	@python3 tests/render/screenshots.py
 
 demo: ## write demo labs to /tmp/clab-demo (use: eval "$(make -s demo)")
 	@python3 tests/demo.py /tmp/clab-demo --large

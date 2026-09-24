@@ -1,0 +1,22 @@
+{
+  "defaultIconColor": "#005aff",
+  "roleSvgMap": {
+    "bridge": "bridge",
+    "client": "client",
+    "cloud": "cloud",
+    "controller": "controller",
+    "dcgw": "dcgw",
+    "default": "pe",
+    "leaf": "leaf",
+    "p": "pe",
+    "pe": "pe",
+    "pon": "pon",
+    "rgw": "rgw",
+    "router": "pe",
+    "server": "server",
+    "spine": "spine",
+    "super-spine": "super-spine",
+    "switch": "switch",
+    "ue": "ue"
+  }
+}

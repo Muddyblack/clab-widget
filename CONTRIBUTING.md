@@ -48,18 +48,46 @@ Look at a change without a running shell:
 
 ```bash
 QML_XHR_ALLOW_FILE_READ=1 QML_XHR_ALLOW_FILE_WRITE=1 QT_QPA_PLATFORM=offscreen \
-  qml tests/render/Render.qml -- list fabric snap.json out.png   # list | map | settings | menu | nodemenu
+  qml tests/render/Render.qml -- list fabric snap.json out.png   # list | map | settings | menu | nodemenu | hosts
+# no qml tool? the same with PySide6:  python3 tests/render/run.py tests/render/Render.qml list fabric snap.json out.png
 python3 desktop/app.py --render out.png --page settings
 python3 desktop/app.py --selftest
+make screenshots     # re-render the README images (docs/readme/*.png) from the demo labs
 ```
+
+Remote hosts without a lab server: `tests/test_clab_status.py` (`SshHost`) runs the
+whole ssh path against a fake `ssh` that executes the remote command locally.
 
 New UI icons: drop the Lucide SVG into `package/contents/icons/ui/` and run `make icons`.
 
 App icons (the "Icon" setting): `assets/icon.png` is the containerlab one,
-`assets/icon-netlab.png` the netlab one (currently a purple placeholder made
-by `tools/netlab-placeholder.py`). Replace a PNG with new artwork in the same
-style (rounded tile, emblem in the middle, name at the bottom) and run
-`make app-icons`: 16–128 px get the emblem only, 256 px the full tile.
+`assets/icon-netlab.png` the netlab one: rounded glass tiles with the emblem
+filling them and no text, so they read at 16 px too. Replace a PNG with new
+artwork and run `make app-icons`, which scales the whole tile to every size.
+
+## Upstream data (clab-ui, vscode-containerlab)
+
+The widget doesn't embed clab-ui (React / Electron) or the VS Code extension;
+it reuses their *data* so the map and node actions look and behave the same:
+
+| What | From | In this repo |
+| --- | --- | --- |
+| Node icons | clab-ui `src/icons/SvgGenerator.ts` (run as is with Node) | `package/contents/icons/nodes/*.svg` |
+| Role label → icon, default icon colour | clab-ui `src/core/types/graph.ts` (`ROLE_SVG_MAP`, `DEFAULT_ICON_COLOR`) | `package/contents/upstream/clab-ui-roles.json` |
+| `docker exec` command / SSH user per kind | vscode-containerlab `resources/exec_cmd.json`, `ssh_users.json` | `package/contents/upstream/*.json` |
+
+`make sync-upstream` (tools/sync-upstream.py) clones both repos, regenerates
+those files and records the commits in `upstream/SOURCES.json`;
+`tools/sync-upstream.py --check` exits 1 when upstream has moved on. Don't edit
+the files by hand. If clab-ui adds a role, the tests say what else it needs:
+a tier in `ROLE_TIER` (Labs.js, map rows) and the schema's role list.
+
+The formats the widget *reads* at run time are upstream's too and are handled
+in `clab-status`: `topology-data.json` + the `graph-*` labels (containerlab),
+`<topology>.annotations.json` (clab-ui: icon, colour, position),
+`netlab status --format json`, clabernetes' `c9s.run` objects and Kubus'
+`kubus://` links. A format change there means a code change, with a fixture
+in `tests/fixtures/` to show it.
 
 ## Releases
 

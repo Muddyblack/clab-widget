@@ -14,7 +14,8 @@ Your [b]containerlab[/b] and [b]netlab[/b] labs at a glance, on the desktop, in 
 [*] [b]One click back:[/b] SSH, docker shell, logs, open in containerlab / netlab-ui / VS Code.
 [*] [b]Right-click everything:[/b] map, pin, copy, stop (confirmed, and re-checked before it runs).
 [*] [b]Notifications:[/b] a node goes down, a host is unreachable, a lab left running for hours.
-[*] [b]Remote hosts:[/b] clab-api-server and netlab-ui servers, next to your local labs.
+[*] [b]Remote hosts:[/b] any number of lab machines over ssh (nothing to install there), WSL2, clab-api-server and netlab-ui servers, next to your local labs.
+[*] [b]Kubernetes:[/b] containerlab topologies on k8s / k3s through clabernetes, with kubectl exec / logs, and open in Kubus.
 [*] [b]Glass look:[/b] the same materials as Glassy System Monitor and the audio visualizer.
 [*] [b]Pin labs:[/b] show just the labs you care about in the panel.
 [/list]
@@ -22,9 +23,9 @@ Your [b]containerlab[/b] and [b]netlab[/b] labs at a glance, on the desktop, in 
 [b]Requirements[/b]
 [list]
 [*] Plasma 6, Python 3
-[*] containerlab and/or netlab on this machine, or a remote clab-api-server / netlab-ui
+[*] containerlab and/or netlab on this machine, or on another one (ssh, clab-api-server, netlab-ui)
 [/list]
 
-Also for Hyprland (Quickshell) and as a tray app for Windows and macOS: [url=https://github.com/Muddyblack/clab-widget]GitHub[/url].
+Also for Hyprland (Quickshell) and as a tray app for Windows, macOS and GNOME: [url=https://github.com/Muddyblack/clab-widget]GitHub[/url].
 
-[b]License:[/b] GPL-3.0-or-later.
+[b]License:[/b] GPL-3.0.

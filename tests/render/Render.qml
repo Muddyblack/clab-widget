@@ -6,12 +6,15 @@ import "../../package/contents/ui/shared"
 // Off-screen render of the shared Popup, for visual checks and timings:
 //   QML_XHR_ALLOW_FILE_READ=1 QML_XHR_ALLOW_FILE_WRITE=1 QT_QPA_PLATFORM=offscreen \
 //     qml tests/render/Render.qml -- PAGE LAB SNAP.json OUT.png [QUERY]
-// PAGE: list | map | settings | menu (lab right-click menu) | nodemenu. LAB: lab name to expand / show on the map ("-" = none).
+// PAGE: list | map | settings[-labs|-alerts|-look|-placement|-info] | menu (lab right-click menu) | nodemenu | hosts (remote hosts page, sample
+// connections). LAB: lab name to expand / show on the map ("-" = none).
+// Without the qml tool: python3 tests/render/run.py tests/render/Render.qml PAGE LAB SNAP.json OUT.png
 // Writes parse / row-model / render times to OUT.png.timing.txt.
 Rectangle {
     id: root
     width: 520
-    height: page === "settings" ? 1180 : 720
+    // The map gets a fixed canvas; other pages are as tall as the popup's content.
+    height: page === "map" ? 720 : Math.min(1180, Math.max(260, pop.implicitHeight + 28))
     // A wallpaper-ish backdrop so the translucent glass card reads as it would.
     gradient: Gradient {
         GradientStop {
@@ -63,8 +66,41 @@ Rectangle {
         framed: true
         theme: Theme.glass()
         cfg: cfg
-        maxBodyHeight: root.height - 120
+        maxBodyHeight: root.page === "map" ? 600 : (root.page.indexOf("settings") === 0 ? 1060 : 640)
         lastOkAt: Date.now()
+        extraTitle: "Remote hosts"
+        extraPage: Component {
+            ConnectionsPage {
+                showHeader: false
+                theme: Theme.glass()
+                connections: [
+                    {
+                        name: "lab-box",
+                        type: "ssh",
+                        host: "me@lab-box"
+                    },
+                    {
+                        name: "k3s",
+                        type: "k8s",
+                        context: "k3s",
+                        namespace: "c9s-srl02"
+                    },
+                    {
+                        name: "dc-server",
+                        type: "clab-api",
+                        url: "https://dc-server:8090",
+                        username: "me",
+                        group: "dc-server"
+                    },
+                    {
+                        name: "dc-server-netlab",
+                        type: "netlab-ui",
+                        url: "http://dc-server:8000",
+                        group: "dc-server"
+                    }
+                ]
+            }
+        }
     }
 
     Component.onCompleted: {
@@ -107,8 +143,13 @@ Rectangle {
                     root.note("refresh with it expanded: " + (Date.now() - t5) + " ms");
                 }
             }
-            if (root.page === "settings")
+            if (root.page.indexOf("settings") === 0) {
                 pop.page = "settings";
+                if (root.page.indexOf("-") > 0)
+                    pop.settingsTab = root.page.split("-")[1];
+            }
+            if (root.page === "hosts")
+                pop.page = "extra";
             shot.start();
         };
         xhr.send();

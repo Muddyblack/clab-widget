@@ -39,6 +39,8 @@ function lifecycleText(lab) {
 
 // "netlab · via containerlab", "containerlab", "netlab · libvirt"
 function badgeText(lab) {
+    if (lab.via === "k8s")
+        return "clabernetes";
     if (lab.managedBy !== "netlab")
         return lab.managedBy;
     var p = (lab.providers || []).join(", ");
@@ -106,13 +108,20 @@ function sourceNotices(snap) {
     if (snap.error)
         out.push(snap.error);
     var src = snap.sources || {};
+    var missing = [], anyWorks = false;
     for (var key in src) {
         var st = src[key];
         if (st.error)
             out.push(sourceName(key) + ": " + st.error);
         else if (!st.available)
-            out.push(sourceName(key) + " not found on PATH");
+            missing.push(sourceName(key));
+        else
+            anyWorks = true;
     }
+    // A tool missing here is normal on Windows/macOS or with remote hosts; say
+    // so only when nothing works at all, with the way out.
+    if (!anyWorks && missing.length > 0 && out.length === 0)
+        out.push(missing.join(" / ") + " not found here. They run on Linux: add a lab machine under remote hosts (ssh, clab-api-server or netlab-ui).");
     return out;
 }
 
@@ -355,8 +364,35 @@ var SHOW_MODES = [
     }
 ];
 
+// Local path from the backend → file URL. Windows paths ("C:\\x\\y.svg") need
+// "file:///C:/x/y.svg"; "file://" + path would read "C:" as the host.
+function fileUrl(path) {
+    if (!path)
+        return "";
+    var p = String(path).replace(/\\/g, "/");
+    return "file://" + (p.charAt(0) === "/" ? "" : "/") + encodeURI(p);
+}
+
 function sourceArgs(show) {
     return show === "containerlab" ? ["--no-netlab"] : [];
+}
+
+// clab-status argv for "open" and node shells. Labs on an ssh host carry their
+// connection (--via; ssh or WSL), so the backend runs the command there.
+function openArgs(lab) {
+    // clabernetes: Kubus needs the Topology's name and namespace.
+    if (lab.via === "k8s")
+        return ["open", lab.managedBy, lab.name, lab.namespace || "", "--via", lab.conn];
+    if (lab.via)
+        return ["open", lab.managedBy, lab.topologyFile || "", lab.dir || "", "--via", lab.conn];
+    if (lab.remote)
+        return ["open", lab.managedBy, "", "", "--remote", "--ui", lab.uiUrl || ""];
+    return ["open", lab.managedBy, lab.topologyFile || "", lab.dir || ""];
+}
+
+function shellArgs(lab, node, mode) {
+    var args = ["shell", mode, node.kind, node.container || "", node.name, lab.dir || ""];
+    return lab.via ? args.concat(["--via", lab.conn]) : args;
 }
 
 // tab: "containerlab" | "netlab", used only when show === "tabs".
@@ -411,6 +447,37 @@ var MAX_MAP_HEIGHT = 480;
 
 // maxHeight: cap for an inline map (default 480); the map page passes
 // Infinity and lets the view scroll/zoom instead.
+// Mostly-placed labs (a few nodes added after the last clab-ui save) keep the
+// saved layout: the unplaced nodes go in rows below it, spaced like the rest.
+// Fewer than half placed: the positions say too little; tiers are used.
+function fillPositions(nodes) {
+    var placed = [], missing = [], i;
+    for (i = 0; i < nodes.length; i++)
+        (nodes[i].position ? placed : missing).push(nodes[i]);
+    if (missing.length === 0 || placed.length * 2 < nodes.length)
+        return nodes;
+    var minX = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (i = 0; i < placed.length; i++) {
+        minX = Math.min(minX, placed[i].position.x);
+        maxX = Math.max(maxX, placed[i].position.x);
+        maxY = Math.max(maxY, placed[i].position.y);
+    }
+    var span = Math.max(1, maxX - minX);
+    var gap = placed.length > 1 ? Math.max(40, span / Math.max(1, Math.ceil(Math.sqrt(placed.length)))) : 80;
+    var perRow = Math.max(1, Math.floor(span / gap) + 1);
+    var extra = {};
+    for (i = 0; i < missing.length; i++)
+        extra[missing[i].name] = {
+            x: minX + (i % perRow) * gap,
+            y: maxY + gap * (1 + Math.floor(i / perRow))
+        };
+    return nodes.map(function (n) {
+        return n.position ? n : Object.assign({}, n, {
+            position: extra[n.name]
+        });
+    });
+}
+
 function mapLayout(nodes, w, maxHeight) {
     var cap = maxHeight === undefined ? MAX_MAP_HEIGHT : maxHeight;
     var pad = 22;
@@ -427,6 +494,7 @@ function mapLayout(nodes, w, maxHeight) {
     var i;
     var inner = Math.max(1, w - 2 * pad);
 
+    nodes = fillPositions(nodes);
     var allPlaced = true;
     for (i = 0; i < n; i++)
         if (!nodes[i].position)

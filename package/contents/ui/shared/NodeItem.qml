@@ -46,7 +46,7 @@ Rectangle {
 
             Image {
                 anchors.fill: parent
-                source: item.node.icon ? "file://" + item.node.icon : ""
+                source: Labs.fileUrl(item.node.icon)
                 sourceSize: Qt.size(36, 36)
                 asynchronous: true
                 opacity: item.node.running ? 1 : 0.4
@@ -96,7 +96,9 @@ Rectangle {
             text: item.copied ? "copied" : (addr || "—")
             color: item.copied ? item.theme.ok : (ipMouse.containsMouse && addr ? item.theme.text : item.theme.sub)
             font.pixelSize: item.theme.smallSize
-            font.family: "monospace"
+            // A real family per platform: a missing generic name makes Qt
+            // scan every font for an alias (slow, and a warning on macOS).
+            font.family: Qt.platform.os === "osx" ? "Menlo" : Qt.platform.os === "windows" ? "Consolas" : "monospace"
 
             MouseArea {
                 id: ipMouse

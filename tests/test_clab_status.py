@@ -7,6 +7,7 @@ import importlib.machinery
 import importlib.util
 import json
 import os
+import re
 import tempfile
 import unittest
 
@@ -122,7 +123,11 @@ class Topology(unittest.TestCase):
         with open(os.path.join(root, "clab-fab", "topology-data.json"), "w") as f:
             json.dump(
                 {
-                    "nodes": {"s1": {"labels": {"graph-icon": "spine"}}, "l1": {"labels": {}}},
+                    "nodes": {
+                        "s1": {"labels": {"graph-icon": "spine", "graph-posX": "120", "graph-posY": "40.5"}},
+                        "l1": {"labels": {"graph-posX": "1", "graph-posY": "2"}},
+                        "br": {"labels": {"graph-posX": "nan", "graph-posY": "x"}},
+                    },
                     "links": [
                         {
                             "endpoints": {
@@ -172,9 +177,13 @@ class Topology(unittest.TestCase):
         self.assertIn("#80b9d8", svg)
         self.assertNotIn("#005aff", svg)
 
+    def test_legacy_position_labels(self):
+        self.assertEqual(self.nodes["s1"]["position"], {"x": 120.0, "y": 40.5})
+        self.assertEqual(self.nodes["l1"]["position"], {"x": 40, "y": 230})  # annotation wins
+        self.assertNotIn("position", self.nodes["br"])
+
     def test_position_and_links(self):
         self.assertEqual(self.nodes["l1"]["position"], {"x": 40, "y": 230})
-        self.assertNotIn("position", self.nodes["s1"])
         self.assertEqual(self.lab["links"], [{"a": "s1", "aIf": "e1-1", "z": "l1", "zIf": "e1-49"}])
 
     def test_missing_lab_dir_still_has_icons(self):
@@ -415,7 +424,8 @@ class Remote(unittest.TestCase):
         with mock.patch("getpass.getpass", return_value="pw"), mock.patch("sys.stdout"):
             self.assertEqual(cs.cmd_login(["srv", self.url, "alice"]), 0)
         tokens_path = os.path.join(os.environ["XDG_STATE_HOME"], "clab-widget", "tokens.json")
-        self.assertEqual(os.stat(tokens_path).st_mode & 0o777, 0o600)
+        if os.name == "posix":  # Windows has no mode bits; the file sits in the user's profile
+            self.assertEqual(os.stat(tokens_path).st_mode & 0o777, 0o600)
         with open(tokens_path) as f:
             self.assertEqual(json.load(f), {"srv": "good"})
         self.assertEqual(cs.load_connections()[0]["url"], self.url)
@@ -469,6 +479,331 @@ class RemoteGroups(unittest.TestCase):
         self.assertEqual((vms["host"], vms["remote"]), ("box", True))
         self.assertTrue(vms["id"].startswith("remote:srv-nl:"))
         self.assertEqual(len(by["other"][0]), 2)  # different group: no merge
+
+
+FAKE_SSH = """#!/bin/sh
+# Fake ssh for the tests: drop the options, run the remote command here,
+# after a chatty login profile (the snapshot must still parse).
+while [ "$1" != "--" ]; do shift; done
+shift 2
+echo "Welcome to box"
+exec sh -c "$*"
+"""
+
+
+@unittest.skipIf(os.name == "nt", "fake ssh is a shell script")
+class SshHost(unittest.TestCase):
+    """ssh hosts: this script runs on the host through `ssh … python3 -`."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        fake = os.path.join(self.tmp.name, "ssh")
+        with open(fake, "w") as f:
+            f.write(FAKE_SSH)
+        os.chmod(fake, 0o755)
+        old_bin = cs.SSH_BIN
+        cs.SSH_BIN = fake
+        self.addCleanup(setattr, cs, "SSH_BIN", old_bin)
+        env = {
+            "XDG_CONFIG_HOME": os.path.join(self.tmp.name, "cfg"),
+            "XDG_STATE_HOME": os.path.join(self.tmp.name, "state"),
+            "CLAB_WIDGET_CLAB_JSON": os.path.join(FIXTURES, "clab_mixed.json"),
+            "CLAB_WIDGET_NETLAB_JSON": os.path.join(FIXTURES, "netlab_mixed.json"),
+        }
+        for var, value in env.items():
+            old = os.environ.get(var)
+            os.environ[var] = value
+            self.addCleanup(lambda v=var, o=old: os.environ.pop(v) if o is None else os.environ.__setitem__(v, o))
+        self.conn = {"name": "box", "type": "ssh", "host": "me@box"}
+
+    def test_snapshot_over_ssh(self):
+        snap, err = cs.fetch_ssh(self.conn)
+        self.assertIsNone(err)
+        local = snapshot("clab_mixed.json", "netlab_mixed.json")
+        self.assertEqual(len(snap["labs"]), len(local["labs"]))
+        results = cs.collect_remotes([self.conn], {})
+        self.assertEqual(results[0][0], "box")
+        self.assertIsNone(results[0][2])
+        labs = results[0][1]
+        self.assertTrue(all(lab["id"].startswith("remote:box:") and lab["via"] == "ssh" for lab in labs))
+        full = cs.build_snapshot({}, None, {}, None, BOTH, remotes=results)
+        self.assertEqual(full["totals"]["nodes"], local["totals"]["nodes"])
+        lab = next(lab for lab in full["labs"] if lab["managedBy"] == "containerlab" and lab["running"])
+        self.assertIn("shell", lab["actions"])
+        self.assertIn("stop", lab["actions"])
+        self.assertTrue(any(n["access"] for n in lab["nodes"]))
+        for n in lab["nodes"]:
+            self.assertTrue(os.path.isfile(n["icon"]), n["icon"])
+
+    def test_unreachable(self):
+        cs.SSH_BIN = os.path.join(self.tmp.name, "nope")
+        snap, err = cs.fetch_ssh(self.conn)
+        self.assertIsNone(snap)
+        self.assertIn("ssh", err)
+
+    def test_ssh_failure_message(self):
+        with open(cs.SSH_BIN, "w") as f:
+            f.write("#!/bin/sh\necho 'ssh: connect to host box port 22: Connection refused' >&2\nexit 255\n")
+        snap, err = cs.fetch_ssh(self.conn)
+        self.assertIsNone(snap)
+        self.assertEqual(err, "ssh: ssh: connect to host box port 22: Connection refused")
+        ok, err = cs.login(dict(self.conn), "")
+        self.assertFalse(ok)
+        self.assertIn("key login", err)
+        self.assertEqual(cs.load_connections(), [])
+
+    def test_login_saves_ssh_host_without_secrets(self):
+        ok, err = cs.login(dict(self.conn), "ignored")
+        self.assertTrue(ok, err)
+        self.assertEqual(cs.load_connections(), [self.conn])
+        self.assertEqual(cs.load_tokens(), {})
+
+    def test_add_command(self):
+        import contextlib
+        import io
+
+        def add(conn):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = cs.main(["add", json.dumps(conn)])
+            return rc, json.loads(buf.getvalue())
+
+        rc, out = add(dict(self.conn, junk="x", port=""))
+        self.assertEqual((rc, out), (0, {"ok": True, "message": "added box"}))
+        self.assertEqual(cs.load_connections(), [self.conn])
+        rc, out = add({"name": "api", "type": "clab-api", "url": "https://x"})
+        self.assertEqual(rc, 1)
+        self.assertIn("password", out["message"])
+        rc, out = add({"name": "ui", "type": "netlab-ui", "url": "http://x:8000"})
+        self.assertTrue(out["ok"])
+        self.assertEqual([c["name"] for c in cs.load_connections()], ["box", "ui"])
+
+    def test_tool_errors_on_host(self):
+        snap = {"sources": {"containerlab": {"available": False, "error": "permission denied"}}}
+        self.assertEqual(cs.ssh_source_error(snap), "containerlab: permission denied")
+        snap["sources"]["netlab"] = {"available": True, "error": ""}
+        self.assertIsNone(cs.ssh_source_error(snap))
+        self.assertIn("neither", cs.ssh_source_error({"sources": {}}))
+
+
+class Upstream(unittest.TestCase):
+    """Data from clab-ui / vscode-containerlab (package/contents/upstream, tools/sync-upstream.py)."""
+
+    def test_loaded(self):
+        self.assertEqual(cs.ROLE_SVG_MAP["router"], "pe")
+        self.assertEqual(cs.EXEC_CMD["nokia_srlinux"], "sr_cli")
+        self.assertEqual(cs.SSH_USERS["arista_ceos"], "admin")
+        self.assertRegex(cs.DEFAULT_ICON_COLOR, r"^#[0-9a-f]{6}$")
+
+    def test_every_role_has_an_icon_a_tier_and_a_schema_entry(self):
+        with open(os.path.join(HERE, "..", "docs", "snapshot.schema.json")) as f:
+            enum = set(json.load(f)["$defs"]["node"]["properties"]["role"]["enum"])
+        with open(os.path.join(HERE, "..", "package", "contents", "code", "Labs.js")) as f:
+            labs_js = f.read()
+        for role in cs.ROLE_ICONS:
+            self.assertTrue(os.path.isfile(os.path.join(cs.ICON_DIR, role + ".svg")), role)
+            self.assertIn(role, enum)
+            self.assertRegex(labs_js, rf'"{re.escape(role)}": \d')
+
+    def test_icons_use_the_default_colour(self):
+        with open(os.path.join(cs.ICON_DIR, "leaf.svg")) as f:
+            self.assertIn(cs.DEFAULT_ICON_COLOR, f.read().lower())
+
+    def test_script_sent_to_hosts_carries_the_data(self):
+        src = cs.own_source().decode()
+        ns = {"__name__": "remote", "__file__": "<stdin>"}
+        exec(compile(src, "<stdin>", "exec"), ns)
+        self.assertEqual(ns["ROLE_SVG_MAP"], cs.ROLE_SVG_MAP)
+        self.assertEqual(ns["EXEC_CMD"], cs.EXEC_CMD)
+
+
+class SshPlans(unittest.TestCase):
+    conn = {"name": "box", "type": "ssh", "host": "me@box", "port": 2222}
+
+    def test_parse_ssh_url(self):
+        self.assertEqual(cs.parse_ssh_url("b", "ssh://me@box:2222"), dict(self.conn, name="b"))
+        self.assertEqual(cs.parse_ssh_url("b", "ssh://box"), {"name": "b", "type": "ssh", "host": "box"})
+        self.assertEqual(cs.parse_ssh_url("b", "ssh://me@box:22")["host"], "me@box")
+        self.assertIsNone(cs.parse_ssh_url("b", "ssh://-oProxyCommand=x"))
+        self.assertIsNone(cs.parse_ssh_url("b", "http://box"))
+
+    def test_invalid_connections_are_dropped(self):
+        self.assertFalse(cs.valid_connection({"name": "x", "type": "ssh", "host": "-oProxyCommand=evil"}))
+        self.assertFalse(cs.valid_connection({"name": "x", "type": "ssh"}))
+        self.assertTrue(cs.valid_connection(self.conn))
+        self.assertFalse(cs.valid_connection(dict(self.conn, port="22; rm")))
+        self.assertFalse(cs.valid_connection(dict(self.conn, port=70000)))
+
+    def test_argv(self):
+        argv = cs.ssh_argv(self.conn)
+        self.assertIn("BatchMode=yes", argv)
+        self.assertEqual(argv[-2:], ["--", "me@box"])
+        self.assertEqual(argv[argv.index("-p") + 1], "2222")
+        self.assertIn("-t", cs.ssh_argv(self.conn, interactive=True))
+        self.assertNotIn("BatchMode=yes", cs.ssh_argv(self.conn, interactive=True))
+
+    def test_shell_runs_on_host(self):
+        argv = cs.ssh_shell_plan(self.conn, "exec", "nokia_srlinux", "clab-fab-s1", env={})
+        self.assertEqual(argv[-1], "sh -lc 'docker exec -it clab-fab-s1 sr_cli'")
+        argv = cs.ssh_shell_plan(self.conn, "connect", "frr", "", "r1", "/srv/my lab", env={})
+        self.assertIn("netlab", argv[-1])
+        self.assertIn("my lab", argv[-1])
+
+    def test_stop_and_open(self):
+        clab = {"managedBy": "containerlab", "topologyFile": "/srv/fab.clab.yml", "dir": "/srv"}
+        argv = cs.ssh_stop_plan(self.conn, clab)
+        self.assertIn("destroy -t /srv/fab.clab.yml", argv[-1])
+        self.assertIn("-t", argv)
+        argv = cs.ssh_stop_plan(self.conn, {"managedBy": "netlab", "dir": "/srv/x"})
+        self.assertIn("netlab down", argv[-1])
+        argv = cs.ssh_open_plan(self.conn, "/srv", lambda b: "/bin/" + b if b == "code" else None)
+        self.assertEqual(argv, ["/bin/code", "--remote", "ssh-remote+me@box", "/srv"])
+
+    def test_wsl(self):
+        conn = {"name": "wsl", "type": "wsl", "distro": "Ubuntu"}
+        self.assertTrue(cs.valid_connection(conn))
+        self.assertTrue(cs.valid_connection({"name": "wsl", "type": "wsl"}))
+        self.assertFalse(cs.valid_connection({"name": "w", "type": "wsl", "distro": "-x"}))
+        argv = cs.host_argv(conn, "echo hi")
+        self.assertTrue(argv[0].endswith("wsl.exe"))
+        self.assertEqual(argv[1:], ["-d", "Ubuntu", "-e", "sh", "-lc", "echo hi"])
+        argv = cs.ssh_shell_plan(conn, "logs", "linux", "clab-x-a", env={})
+        self.assertEqual(argv[-1], "docker logs -f --tail 200 clab-x-a")
+        argv = cs.ssh_open_plan(conn, "/home/me/lab", lambda b: b)
+        self.assertEqual(argv, ["code", "--remote", "wsl+Ubuntu", "/home/me/lab"])
+        labs = cs.ssh_labs(conn, snapshot("clab_mixed.json"))
+        self.assertTrue(all(lab["via"] == "wsl" and lab["wslDistro"] == "Ubuntu" for lab in labs))
+        snap = cs.build_snapshot({}, None, {}, None, BOTH, remotes=[("wsl", labs, None)])
+        self.assertIn("shell", snap["labs"][0]["actions"])
+
+    def test_terminal_plans(self):
+        self.assertEqual(cs.terminal_plan(["ssh", "x"], "win32"), (["ssh", "x"], 0x10))
+        argv, _ = cs.terminal_plan(["ssh", "-t", "a b"], "darwin")
+        self.assertEqual(argv[0], "osascript")
+        self.assertIn("do script \"ssh -t 'a b'\"", argv[2])
+        self.assertEqual(cs.terminal_plan(["x"], "linux", lambda: ["konsole", "-e"]), (["konsole", "-e", "x"], 0))
+        self.assertIsNone(cs.terminal_plan(["x"], "linux", lambda: None))
+
+
+FAKE_KUBECTL = """#!/bin/sh
+# Fake kubectl: prints the saved clabernetes objects for `get`, records argv.
+echo "$*" >> "$(dirname "$0")/argv.log"
+case "$*" in
+  *" get topologies.c9s.run,nodes.c9s.run,links.c9s.run "*) cat "$C9S_FIXTURE" ;;
+  *) echo "error: unknown" >&2; exit 1 ;;
+esac
+"""
+
+
+class Clabernetes(unittest.TestCase):
+    """clabernetes on Kubernetes: kubectl → one lab per Topology."""
+
+    conn = {"name": "k3s", "type": "k8s", "context": "k3s-lab"}
+
+    def labs(self):
+        items = fixture("c9s.json")["items"]
+        snap = cs.build_snapshot({}, None, {}, None, BOTH, remotes=[("k3s", cs.k8s_labs(self.conn, items), None)])
+        return snap, {lab["name"]: lab for lab in snap["labs"]}
+
+    def test_topology_to_lab(self):
+        _snap, labs = self.labs()
+        lab = labs["srl02"]
+        self.assertEqual(lab["id"], "remote:k3s:k8s:c9s-srl02/srl02")
+        self.assertEqual((lab["managedBy"], lab["providers"], lab["via"]), ("containerlab", ["clabernetes"], "k8s"))
+        self.assertEqual((lab["running"], lab["total"], lab["lifecycle"]), (2, 3, "partial"))
+        self.assertEqual(lab["namespace"], "c9s-srl02")
+        nodes = {n["name"]: n for n in lab["nodes"]}
+        self.assertEqual(nodes["srl1"]["role"], "spine")
+        self.assertEqual(nodes["srl1"]["ipv4"], "10.123.0.11")
+        self.assertEqual(nodes["srl1"]["container"], "c9s-srl02/srl1")
+        self.assertEqual(nodes["client1"]["state"], "notready")
+        self.assertEqual(nodes["client1"]["status"], "CrashLoopBackOff")
+        self.assertEqual(len(lab["links"]), 2)
+        self.assertEqual(nodes["srl1"]["access"], ["exec", "logs"])
+        self.assertEqual(nodes["client1"]["access"], ["logs"])  # down: logs still help
+        self.assertIn("shell", lab["actions"])
+        self.assertIn("stop", lab["actions"])
+
+    def test_deploying_and_errors(self):
+        _snap, labs = self.labs()
+        self.assertEqual(labs["evpn"]["lifecycle"], "starting")
+        self.assertFalse(labs["evpn"]["nodesKnown"])
+        self.assertIn("conflicts", labs["broken"]["status"])
+        self.assertEqual(labs["broken"]["lifecycle"], "unknown")
+
+    def test_plans(self):
+        argv = cs.k8s_shell_plan(self.conn, "exec", "nokia_srlinux", "c9s-srl02/srl1", env={})
+        self.assertEqual(
+            argv[1:], ["--context", "k3s-lab", "-n", "c9s-srl02", "exec", "-it", "deploy/srl1", "--", "sr_cli"]
+        )
+        argv = cs.k8s_shell_plan(self.conn, "logs", "linux", "c9s-srl02/client1", env={})
+        self.assertEqual(argv[-5:], ["logs", "-f", "--tail", "200", "deploy/client1"])
+        self.assertIsNone(cs.k8s_shell_plan(self.conn, "exec", "linux", "no-namespace", env={}))
+        argv = cs.k8s_stop_plan(self.conn, {"namespace": "c9s-srl02", "name": "srl02"})
+        self.assertEqual(argv[-4:], ["c9s-srl02", "delete", "topologies.c9s.run", "srl02"])
+        self.assertEqual(
+            cs.hold_open(["C:\\k\\kubectl.exe", "delete", "x"], "win32"), ["cmd", "/k", "kubectl", "delete", "x"]
+        )
+        self.assertEqual(cs.hold_open(["kubectl", "x"], "linux")[:2], ["sh", "-c"])
+
+    def test_kubus(self):
+        self.assertEqual(
+            cs.kubus_url("k3s-lab", "c9s-srl02", "srl02"),
+            "kubus://r/c9s.run/v1alpha1/topologies?sel=k3s-lab%7Cc9s-srl02%7Csrl02",
+        )
+        self.assertEqual(
+            cs.kubus_app(lambda b: "/usr/bin/kubus" if b == "kubus" else None, "linux"), ["/usr/bin/kubus"]
+        )
+        self.assertIsNone(cs.kubus_app(lambda b: None, "linux"))
+        self.assertEqual(
+            cs.kubus_app(lambda b: None, "darwin", isdir=lambda p: p == "/Applications/Kubus.app"), ["open"]
+        )
+        self.assertIsNone(cs.kubus_app(lambda b: None, "win32", env={}))
+        from unittest import mock
+
+        lab = self.labs()[1]["srl02"]
+        with mock.patch.object(cs, "kubus_app", lambda _which: ["/x/kubus"]):
+            self.assertIn("open", cs.lab_actions(lab))
+        with mock.patch.object(cs, "kubus_app", lambda _which: None):
+            self.assertNotIn("open", cs.lab_actions(lab))
+
+    def test_connections(self):
+        self.assertTrue(cs.valid_connection(self.conn))
+        self.assertTrue(cs.valid_connection({"name": "k", "type": "k8s"}))
+        self.assertFalse(cs.valid_connection({"name": "k", "type": "k8s", "context": "--kubeconfig=/x"}))
+        argv = cs.kubectl_argv({"name": "k", "type": "k8s", "kubeconfig": "~/k3s.yaml"})
+        self.assertEqual(argv[1], "--kubeconfig")
+        self.assertTrue(argv[2].endswith("k3s.yaml") and "~" not in argv[2])
+
+    def test_schema(self):
+        Schema.setUpClass()
+        Schema().check(self.labs()[0])
+
+    @unittest.skipIf(os.name == "nt", "fake kubectl is a shell script")
+    def test_end_to_end_with_fake_kubectl(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        fake = os.path.join(tmp.name, "kubectl")
+        with open(fake, "w") as f:
+            f.write(FAKE_KUBECTL)
+        os.chmod(fake, 0o755)
+        old = cs.KUBECTL_BIN
+        cs.KUBECTL_BIN = fake
+        self.addCleanup(setattr, cs, "KUBECTL_BIN", old)
+        os.environ["C9S_FIXTURE"] = os.path.join(FIXTURES, "c9s.json")
+        self.addCleanup(os.environ.pop, "C9S_FIXTURE", None)
+        results = cs.collect_remotes([self.conn], {})
+        self.assertEqual([lab["name"] for lab in results[0][1]], ["srl02", "evpn", "broken"])
+        self.assertIsNone(results[0][2])
+        with open(os.path.join(tmp.name, "argv.log")) as f:
+            self.assertIn("--context k3s-lab get topologies.c9s.run,nodes.c9s.run,links.c9s.run -A -o json", f.read())
+        with open(fake, "w") as f:
+            f.write('#!/bin/sh\necho "error: the server doesn\'t have a resource type \\"topologies\\"" >&2\nexit 1\n')
+        _items, err = cs.fetch_k8s(self.conn)
+        self.assertIn("is not installed in this cluster", err)
+        ok, err = cs.login(dict(self.conn), "")
+        self.assertFalse(ok)
 
 
 class Lifecycle(unittest.TestCase):
@@ -630,6 +965,11 @@ class Schema(unittest.TestCase):
             lab.update(remote=True, host="srv", hostUrl="http://x", apiUrl="http://x", conn="srv")
         snap = cs.build_snapshot({}, None, {}, None, BOTH, remotes=[("srv", remote, None)])
         self.check(snap)
+
+    def test_ssh_host(self):
+        remote = snapshot("clab_mixed.json", "netlab_mixed.json")
+        labs = cs.ssh_labs({"name": "box", "type": "ssh", "host": "box"}, json.loads(json.dumps(remote)))
+        self.check(cs.build_snapshot({}, None, {}, None, BOTH, remotes=[("box", labs, None)]))
 
 
 class Source(unittest.TestCase):

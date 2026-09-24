@@ -41,7 +41,37 @@ ColumnLayout {
     ]
     // Hosts with their own header (the shared Popup) hide the title + done.
     property bool showHeader: true
-    property string currentTab: "settings"
+    // Subtabs like the studio: one section at a time instead of a long scroll.
+    property string currentTab: "labs"
+    readonly property var tabs: [
+        {
+            id: "labs",
+            label: "Labs",
+            icon: "network"
+        },
+        {
+            id: "alerts",
+            label: "Alerts",
+            icon: "bell"
+        },
+        {
+            id: "look",
+            label: "Look",
+            icon: "palette"
+        }
+    ].concat(page.showMode || page.showPlacement ? [
+        {
+            id: "placement",
+            label: "Placement",
+            icon: "layout-panel-top"
+        }
+    ] : []).concat([
+        {
+            id: "info",
+            label: "Info",
+            icon: "info"
+        }
+    ])
     signal done
 
     function set(key, value) {
@@ -56,10 +86,10 @@ ColumnLayout {
 
     RowLayout {
         Layout.fillWidth: true
+        visible: page.showHeader
 
         Text {
-            visible: page.showHeader
-            text: page.currentTab === "info" ? "Info" : "Settings"
+            text: "Settings"
             color: page.theme.text
             font.pixelSize: page.theme.fontSize + 2
             font.bold: true
@@ -69,37 +99,37 @@ ColumnLayout {
             Layout.fillWidth: true
         }
 
-        Segmented {
-            theme: page.theme
-            options: [
-                {
-                    id: "settings",
-                    label: "Settings"
-                },
-                {
-                    id: "info",
-                    label: "Info"
-                }
-            ]
-            value: page.currentTab
-            onActivated: v => page.currentTab = v
-        }
-
         ActionButton {
-            visible: page.showHeader
             theme: page.theme
             text: "done"
             onClicked: page.done()
         }
     }
 
+    SettingsTabs {
+        Layout.fillWidth: true
+        Layout.topMargin: -8
+        theme: page.theme
+        tabs: page.tabs
+        current: page.currentTab
+        onActivated: id => page.currentTab = id
+    }
+
+    Rectangle {
+        Layout.fillWidth: true
+        Layout.topMargin: -16
+        height: 1
+        color: page.theme.border
+    }
+
     ColumnLayout {
         Layout.fillWidth: true
-        visible: page.currentTab === "settings"
+        visible: page.currentTab !== "info"
         spacing: 16
 
         SettingsSection {
             Layout.fillWidth: true
+            visible: page.currentTab === "labs"
             theme: page.theme
             title: "Labs"
             icon: "network"
@@ -135,6 +165,7 @@ ColumnLayout {
 
         SettingsSection {
             Layout.fillWidth: true
+            visible: page.currentTab === "alerts"
             theme: page.theme
             title: "Notifications"
             icon: "scroll-text"
@@ -168,6 +199,7 @@ ColumnLayout {
 
         SettingsSection {
             Layout.fillWidth: true
+            visible: page.currentTab === "look"
             theme: page.theme
             title: "Appearance"
             icon: "maximize"
@@ -328,7 +360,7 @@ ColumnLayout {
 
         SettingsSection {
             Layout.fillWidth: true
-            visible: page.showMode || page.showPlacement
+            visible: page.currentTab === "placement" && (page.showMode || page.showPlacement)
             theme: page.theme
             title: "Placement"
             icon: "pin"

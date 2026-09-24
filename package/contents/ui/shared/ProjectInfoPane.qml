@@ -98,7 +98,12 @@ ColumnLayout {
         if (visible && !requested)
             loadCounts();
     }
-    Component.onCompleted: loadCounts()
+    // Hidden inside the settings page until the Info tab opens: no GitHub
+    // requests (counts, avatars) before someone looks.
+    Component.onCompleted: {
+        if (visible)
+            loadCounts();
+    }
     Component.onDestruction: cancelRequests()
 
     Timer {
@@ -141,7 +146,7 @@ ColumnLayout {
                 RoundAvatar {
                     theme: info.activeTheme
                     login: Project.author
-                    source: info.onlineEnabled ? Project.avatar : ""
+                    source: info.onlineEnabled && info.requested ? Project.avatar : ""
                     implicitWidth: 24
                     implicitHeight: 24
                 }
@@ -471,7 +476,7 @@ ColumnLayout {
                         anchors.verticalCenter: parent.verticalCenter
                         theme: info.activeTheme
                         login: contributorCard.modelData.login
-                        source: info.onlineEnabled ? contributorCard.modelData.avatar : ""
+                        source: info.onlineEnabled && info.requested ? contributorCard.modelData.avatar : ""
                         implicitWidth: 30
                         implicitHeight: 30
                     }

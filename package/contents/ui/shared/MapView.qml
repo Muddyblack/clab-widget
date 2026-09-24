@@ -171,16 +171,26 @@ Item {
                         ctx.globalAlpha = 1;
                         ctx.font = Math.max(9, view.theme.smallSize - 1) + "px sans-serif";
                         ctx.textAlign = "center";
+                        var labelled = [];
                         for (var n = 0; n < view.lab.nodes.length; n++) {
                             var node = view.lab.nodes[n], p = pos[node.name];
                             if (!p)
                                 continue;
                             ctx.fillStyle = node.running ? (view.tierShade[node.role] || "#005aff") : Qt.rgba(0.97, 0.44, 0.44, 0.9);
                             ctx.fillRect(p.x * z - s / 2, p.y * z - s / 2, s, s);
-                            if (view.showLabels || !node.running) {
-                                ctx.fillStyle = node.running ? view.theme.sub : view.theme.bad;
-                                ctx.fillText(node.name, p.x * z, p.y * z + s / 2 + 11);
-                            }
+                            if (view.showLabels || !node.running)
+                                labelled.push(node);
+                        }
+                        // Names after all tiles (the next row would cover them),
+                        // down nodes last, each with a dark outline.
+                        labelled.sort((x, y) => (x.running ? 0 : 1) - (y.running ? 0 : 1));
+                        ctx.lineWidth = 3;
+                        ctx.strokeStyle = "rgba(10, 14, 24, 0.85)";
+                        for (n = 0; n < labelled.length; n++) {
+                            var ln = labelled[n], lp = pos[ln.name];
+                            ctx.strokeText(ln.name, lp.x * z, lp.y * z + s / 2 + 11);
+                            ctx.fillStyle = ln.running ? view.theme.sub : view.theme.bad;
+                            ctx.fillText(ln.name, lp.x * z, lp.y * z + s / 2 + 11);
                         }
                     }
                 }
@@ -228,7 +238,7 @@ Item {
 
                         Image {
                             anchors.fill: parent
-                            source: modelData.icon ? "file://" + modelData.icon : ""
+                            source: Labs.fileUrl(modelData.icon)
                             sourceSize: Qt.size(64, 64)
                             asynchronous: true
                             opacity: modelData.running ? 1 : 0.4
