@@ -1,0 +1,39 @@
+<svg
+                            xmlns:xlink="http://www.w3.org/1999/xlink"
+                            xmlns="http://www.w3.org/2000/svg"
+                            xml:space="preserve"
+                            style="enable-background:new 0 0 120 120;"
+                            viewBox="0 0 120 120"
+                            y="0px"
+                            x="0px"
+                            id="Layer_1"
+                            version="1.1"
+                            width="120px"
+                            height="120px"
+                            fill="none"
+                        >
+                            <style type="text/css">
+                                .st0 { fill: #005aff; }
+                                .st1 { fill: none; stroke: #FFFFFF; stroke-width: 4; stroke-linecap: round; stroke-linejoin: round; stroke-miterlimit: 10; }
+                            </style>
+                            <rect height="120" width="120" class="st0" />
+                            <g>
+                                <g>
+                                    <path d="M98,30.1H68L52,89.9H22" class="st1" />
+                                    <path d="M28,100l-7-8.1c-1.3-1.3-1.3-3.1,0-4.3l7-7.6" class="st1" />
+                                    <path d="M92,20l7,8.1c1.3,1.3,1.3,3.1,0,4.3L92,40" class="st1" />
+                                </g>
+                                <g>
+                                    <path d="M98,89.9H64" class="st1" />
+                                    <path d="M92,80l7,7.6c1.3,1.3,1.3,3.1,0,4.3l-7,8.1" class="st1" />
+                                </g>
+                                <g>
+                                    <path d="M56,30.1H22" class="st1" />
+                                    <path d="M28,40l-7-7.6c-1.3-1.3-1.3-3.1,0-4.3l7-8.1" class="st1" />
+                                </g>
+                                <g>
+                                    <line x1="100" y1="60" x2="72" y2="60" class="st1" />
+                                    <line x1="20" y1="60" x2="48" y2="60" class="st1" />
+                                </g>
+                            </g>
+                        </svg>

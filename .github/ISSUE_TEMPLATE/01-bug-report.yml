@@ -1,0 +1,70 @@
+name: Bug report
+description: Report something broken in the widget, tray app, CLI backend, or lab integration.
+title: "[Bug]: "
+body:
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Where does it happen?
+      options:
+        - KDE Plasma 6 widget
+        - Hyprland / Quickshell widget
+        - Desktop tray app (Linux / macOS / Windows)
+        - Backend / CLI tool (clab-status / run)
+        - Multiple platforms / Shared backend
+    validations:
+      required: true
+  - type: dropdown
+    id: component
+    attributes:
+      label: Which component or integration is affected?
+      options:
+        - General UI / Settings / Appearance
+        - Lab overview list / Lab cards
+        - Containerlab integration (local)
+        - netlab integration (local)
+        - Combined labs (netlab via clab)
+        - Remote labs (clab-api-server)
+        - Remote netlab-ui server
+        - Topology view / Map layout
+        - Node actions (SSH shell, docker exec, copy IP)
+        - Lab actions (Stop / destroy confirmation)
+        - Notifications / Unattended lab reminders
+        - Memory & resource stats
+        - Multiple / Other
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Version and environment
+      description: Include the widget version/commit, installation method (KDE Store, Nix flake, manual Git), containerlab and netlab versions, container runtime (Docker or Podman), and desktop environment / OS (KDE Plasma 6, Hyprland, Linux distro, macOS, or Windows).
+      placeholder: "CLAB Widget version: …\nInstalled via: …\nOS / Desktop: …\nContainerlab version: …\nnetlab version: …\nContainer runtime (Docker/Podman): …"
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: Include lab topology details, connection configurations, or actions needed to reproduce the issue.
+      placeholder: "1. Start lab …\n2. Open widget …\n3. Click …\n4. Observe …"
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Screenshots or a short screen recording are helpful for visual, layout, and animation issues.
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Extra context, logs, or clab-status output
+      description: "If relevant, include output from `package/contents/tools/clab-status inspect` or terminal output. ⚠️ IMPORTANT PRIVACY WARNING: Redact all sensitive hostnames, SSH keys, passwords, API tokens, and private network IPs before submitting."

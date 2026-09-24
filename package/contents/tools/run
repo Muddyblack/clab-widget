@@ -1,0 +1,11 @@
+#!/bin/sh
+# Frontends call this, never clab-status directly: plasmashell inherits the
+# systemd user session's PATH, which on NixOS has no python3. The Nix package
+# rewrites PY_DEFAULT to a store path; $PYTHON3 still wins when set.
+PY_DEFAULT="python3"
+PY="${PYTHON3:-$PY_DEFAULT}"
+if ! command -v "$PY" >/dev/null 2>&1; then
+    printf '{"schemaVersion":1,"error":"python3 not found","sources":{},"labs":[],"totals":{"labs":0,"nodes":0,"running":0,"attention":0}}\n'
+    exit 0
+fi
+exec "$PY" "$(dirname "$0")/clab-status" "$@"

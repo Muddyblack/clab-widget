@@ -1,0 +1,1296 @@
+#!/usr/bin/env python3
+"""CLAB Widget backend: one JSON snapshot of every lab on this host.
+
+    clab-status snapshot [--details] [--no-containerlab] [--no-netlab] [--no-remote]
+                         [--clab-json FILE] [--netlab-json FILE]
+    clab-status open <managedBy> <topologyFile> <dir>
+                                       open a lab in the best available tool
+    clab-status shell <ssh|connect|exec|logs> <kind> <container> [<node> <labDir>]
+                                       terminal on a node
+    clab-status notify <title> <body>  desktop notification
+    clab-status login <name> [<url> <user>] [--insecure] [--ca FILE]
+                                       add/refresh a clab-api-server connection
+    clab-status logout <name> [--forget]
+    clab-status stop <labId> <fingerprint>
+                                       tear a lab down via its owner (re-checked)
+
+Sources are `containerlab inspect --all --format json` and
+`netlab status --all --format json`; the --*-json flags (or the
+$CLAB_WIDGET_CLAB_JSON / $CLAB_WIDGET_NETLAB_JSON env vars) feed saved output
+instead, for tests and demos. Every frontend renders the snapshot as-is, so all
+merging and status decisions happen here, not in QML.
+
+A netlab lab deployed through containerlab shows up in both tools. netlab writes
+clab.yml into its instance directory, so a containerlab lab whose topology file
+lives in a netlab instance directory is that netlab lab: they merge into one
+entry, owned by netlab. Lab names are never used for matching — containerlab
+names a netlab lab after its directory, and two unrelated labs can share one.
+"""
+
+import hashlib
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+from datetime import datetime, timezone
+
+SCHEMA_VERSION = 1
+COMMAND_TIMEOUT = 20
+
+# containerlab states that count as "up". Anything else (exited, created,
+# paused, dead, restarting) is a node that should be running but is not.
+RUNNING_STATES = {"running"}
+
+# Kinds without an SSH daemon by default: no "ssh", only a docker shell.
+EXEC_KINDS = {"linux", "bridge", "ovs-bridge", "host", "ext-container"}
+
+# From the containerlab VS Code extension (resources/exec_cmd.json and
+# ssh_users.json): what `docker exec` runs per kind, and the SSH user per kind.
+# $CLAB_WIDGET_EXEC_<KIND> / $CLAB_WIDGET_SSH_USER_<KIND> override them.
+EXEC_CMD = {"nokia_srlinux": "sr_cli", "cisco_xrd": "/pkg/bin/xr_cli.sh"}
+SSH_USERS = {
+    "nokia_srlinux": "admin",
+    "nokia_sros": "admin",
+    "cisco_xrd": "clab",
+    "cisco_xrv9k": "clab",
+    "cisco_xrd_vrouter": "clab",
+    "cisco_xrv": "clab",
+    "arista_ceos": "admin",
+    "juniper_crpd": "root",
+}
+
+
+# ── Running the tools ──────────────────────────────────────────────────────────
+
+
+def run_json(argv, ok_codes=(0,)):
+    """Run argv and parse stdout as JSON. Returns (data, error_string)."""
+    try:
+        proc = subprocess.run(
+            argv,
+            capture_output=True,
+            text=True,
+            timeout=COMMAND_TIMEOUT,
+            stdin=subprocess.DEVNULL,
+        )
+    except FileNotFoundError:
+        return None, "not-installed"
+    except subprocess.TimeoutExpired:
+        return None, f"{argv[0]} timed out after {COMMAND_TIMEOUT}s"
+    try:
+        data = json.loads(proc.stdout) if proc.stdout.strip() else None
+    except json.JSONDecodeError:
+        data = None
+    if proc.returncode not in ok_codes and data is None:
+        msg = (proc.stderr or proc.stdout).strip().splitlines()
+        return None, msg[-1] if msg else f"{argv[0]} exited with {proc.returncode}"
+    if data is None:
+        return None, f"{argv[0]} returned no JSON"
+    return data, None
+
+
+def read_json_file(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f), None
+    except (OSError, json.JSONDecodeError) as ex:
+        return None, str(ex)
+
+
+# ── containerlab ───────────────────────────────────────────────────────────────
+
+
+def clab_containers(data):
+    """Flatten inspect output to a list of container dicts.
+
+    0.6x+ groups by lab name ({"lab": [...]}); older releases used
+    {"containers": [...]}. Both are accepted.
+    """
+    if not isinstance(data, dict):
+        return []
+    if isinstance(data.get("containers"), list):
+        return [c for c in data["containers"] if isinstance(c, dict)]
+    out = []
+    for value in data.values():
+        if isinstance(value, list):
+            out.extend(c for c in value if isinstance(c, dict))
+    return out
+
+
+def strip_prefix_len(ip):
+    ip = (ip or "").strip()
+    if ip in ("", "N/A", "n/a"):
+        return ""
+    return ip.split("/", 1)[0]
+
+
+def short_node_name(container_name, lab_name):
+    """clab-<lab>-<node> → <node>; anything else is left alone."""
+    prefix = f"clab-{lab_name}-"
+    if lab_name and container_name.startswith(prefix):
+        return container_name[len(prefix) :]
+    return container_name
+
+
+def lab_key_path(c):
+    """The topology file identifies a containerlab lab; its name does not."""
+    return c.get("absLabPath") or c.get("labPath") or ""
+
+
+def normalize_clab(data):
+    labs = {}
+    for c in clab_containers(data):
+        path = lab_key_path(c)
+        name = c.get("lab_name") or "unknown"
+        key = path or f"name:{name}"
+        lab = labs.get(key)
+        if lab is None:
+            lab = labs[key] = {
+                "id": f"clab:{key}",
+                "name": name,
+                "clabName": name,
+                "managedBy": "containerlab",
+                "providers": ["containerlab"],
+                "topologyFile": path,
+                "dir": os.path.dirname(path) if path else "",
+                "owner": c.get("owner", ""),
+                "status": "",
+                "nodesKnown": True,
+                "nodes": [],
+            }
+        container = c.get("name", "")
+        state = (c.get("state") or "").lower()
+        lab["nodes"].append(
+            {
+                "name": c.get("nodeName") or short_node_name(container, name),
+                "container": container,
+                "kind": c.get("kind", ""),
+                "image": c.get("image", ""),
+                "group": c.get("group", ""),
+                "state": state or "unknown",
+                "status": c.get("status", ""),
+                "running": state in RUNNING_STATES,
+                "ipv4": strip_prefix_len(c.get("ipv4_address")),
+                "ipv6": strip_prefix_len(c.get("ipv6_address")),
+            }
+        )
+    return list(labs.values())
+
+
+# ── Topology details (icons, links, positions) ─────────────────────────────────
+#
+# containerlab writes clab-<lab>/topology-data.json next to the topology (or
+# under $CLAB_LABDIR_BASE) with each node's labels and every link; clab-ui's
+# optional <topology>.annotations.json holds the icon, colour and canvas
+# position someone picked in the editor. Both are read-only here.
+
+ICON_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "icons", "nodes")
+DEFAULT_ICON_COLOR = "#005aff"  # clab-ui's DEFAULT_ICON_COLOR
+
+# clab-ui's ROLE_SVG_MAP: role label → icon. Unknown roles fall back to "pe".
+ROLE_SVG_MAP = {
+    "router": "pe",
+    "default": "pe",
+    "pe": "pe",
+    "p": "pe",
+    "controller": "controller",
+    "pon": "pon",
+    "dcgw": "dcgw",
+    "leaf": "leaf",
+    "switch": "switch",
+    "rgw": "rgw",
+    "super-spine": "super-spine",
+    "spine": "spine",
+    "server": "server",
+    "bridge": "bridge",
+    "ue": "ue",
+    "cloud": "cloud",
+    "client": "client",
+}
+BRIDGE_KINDS = {"bridge", "ovs-bridge"}
+
+
+def lab_state_dir(lab):
+    base = os.environ.get("CLAB_LABDIR_BASE") or os.path.dirname(lab["topologyFile"])
+    return os.path.join(base, f"clab-{lab['clabName']}")
+
+
+def read_optional_json(path):
+    data, err = read_json_file(path) if path and os.path.isfile(path) else (None, None)
+    return data if isinstance(data, dict) else {}
+
+
+def node_icon(role, color):
+    """Path to the node's SVG. A custom colour gets a recoloured copy in the
+    cache, since QML can't retint clab-ui's two-tone artwork itself."""
+    base = os.path.join(ICON_DIR, f"{role}.svg")
+    if not color or color.lower() == DEFAULT_ICON_COLOR or not color.startswith("#"):
+        return os.path.normpath(base)
+    safe = "".join(ch for ch in color[1:] if ch in "0123456789abcdefABCDEF")[:8]
+    cache = os.path.join(os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache"), "clab-widget", "icons")
+    target = os.path.join(cache, f"{role}-{safe}.svg")
+    if not os.path.isfile(target):
+        try:
+            with open(base, encoding="utf-8") as f:
+                svg = f.read()
+            os.makedirs(cache, exist_ok=True)
+            with open(target, "w", encoding="utf-8") as f:
+                f.write(svg.replace(DEFAULT_ICON_COLOR, f"#{safe}"))
+        except OSError:
+            return os.path.normpath(base)
+    return target
+
+
+def enrich_topology(lab):
+    """Add role/icon/position per node and the lab's links, where available."""
+    if not lab["topologyFile"] or lab.get("remote"):
+        return
+    tdata = read_optional_json(os.path.join(lab_state_dir(lab), "topology-data.json"))
+    ann = read_optional_json(lab["topologyFile"] + ".annotations.json")
+    tnodes = tdata.get("nodes") if isinstance(tdata.get("nodes"), dict) else {}
+    anodes = {a.get("id"): a for a in ann.get("nodeAnnotations") or [] if isinstance(a, dict)}
+
+    for node in lab["nodes"]:
+        labels = (tnodes.get(node["name"]) or {}).get("labels") or {}
+        a = anodes.get(node["name"]) or {}
+        role_label = a.get("icon") or labels.get("graph-icon") or ""
+        if role_label in ROLE_SVG_MAP:
+            role = ROLE_SVG_MAP[role_label]
+        else:
+            role = "bridge" if node["kind"] in BRIDGE_KINDS else "pe"
+        node["role"] = role
+        node["icon"] = node_icon(role, a.get("iconColor", ""))
+        pos = a.get("position")
+        if isinstance(pos, dict) and isinstance(pos.get("x"), (int, float)) and isinstance(pos.get("y"), (int, float)):
+            node["position"] = {"x": pos["x"], "y": pos["y"]}
+
+    links = []
+    for link in tdata.get("links") or []:
+        eps = link.get("endpoints") if isinstance(link, dict) else None
+        if not isinstance(eps, dict) or not isinstance(eps.get("a"), dict) or not isinstance(eps.get("z"), dict):
+            continue
+        a, z = eps["a"], eps["z"]
+        links.append(
+            {
+                "a": a.get("node", ""),
+                "aIf": a.get("interface", ""),
+                "z": z.get("node", ""),
+                "zIf": z.get("interface", ""),
+            }
+        )
+    lab["links"] = links
+
+
+def default_icons(lab):
+    for node in lab["nodes"]:
+        if "role" not in node:
+            node["role"] = "bridge" if node["kind"] in BRIDGE_KINDS else "pe"
+            node["icon"] = node_icon(node["role"], "")
+    lab.setdefault("links", [])
+
+
+# ── Remote hosts (clab-api-server) ───────────────────────────────────────────────
+#
+# Connections: ~/.config/clab-widget/connections.json
+#   [{"name": "lab-server", "url": "https://lab-server:8090", "username": "me",
+#     "insecure": false, "caFile": "", "group": "lab-server"},
+#    {"name": "lab-server-netlab", "type": "netlab-ui",
+#     "url": "http://lab-server:8000", "group": "lab-server"}]
+# type is "clab-api" (default) or "netlab-ui"; connections with the same group
+# are the same machine.
+# Tokens (JWT from POST /login, never the password):
+#   ~/.local/state/clab-widget/tokens.json, mode 0600
+# GET /api/v1/labs returns the same per-container objects as
+# `containerlab inspect`, so remote labs reuse normalize_clab().
+
+REMOTE_TIMEOUT = 8
+SESSION_DURATION = "720h"
+
+
+def config_dir():
+    return os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"), "clab-widget")
+
+
+def state_dir():
+    return os.path.join(os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state"), "clab-widget")
+
+
+def load_connections():
+    data, _err = read_json_file(os.path.join(config_dir(), "connections.json"))
+    if not isinstance(data, list):
+        return []
+    return [c for c in data if isinstance(c, dict) and c.get("name") and str(c.get("url", "")).startswith("http")]
+
+
+def save_connections(conns):
+    os.makedirs(config_dir(), exist_ok=True)
+    with open(os.path.join(config_dir(), "connections.json"), "w", encoding="utf-8") as f:
+        json.dump(conns, f, indent=2)
+        f.write("\n")
+
+
+def load_tokens():
+    data, _err = read_json_file(os.path.join(state_dir(), "tokens.json"))
+    return data if isinstance(data, dict) else {}
+
+
+def save_tokens(tokens):
+    os.makedirs(state_dir(), mode=0o700, exist_ok=True)
+    path = os.path.join(state_dir(), "tokens.json")
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        json.dump(tokens, f)
+    os.chmod(path, 0o600)
+
+
+def ssl_context(conn):
+    import ssl
+
+    if not conn["url"].startswith("https"):
+        return None
+    if conn.get("insecure"):
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        return ctx
+    return ssl.create_default_context(cafile=conn.get("caFile") or None)
+
+
+def api_request(conn, method, path, token=None, body=None):
+    """(status, parsed JSON or None). Status 0 = could not connect."""
+    import urllib.error
+    import urllib.request
+
+    url = conn["url"].rstrip("/") + path
+    headers = {"Accept": "application/json"}
+    data = None
+    if body is not None:
+        data = json.dumps(body).encode()
+        headers["Content-Type"] = "application/json"
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=REMOTE_TIMEOUT, context=ssl_context(conn)) as resp:  # noqa: S310
+            raw = resp.read()
+            status = resp.status
+    except urllib.error.HTTPError as ex:
+        raw, status = ex.read(), ex.code
+    except (OSError, ValueError) as ex:
+        return 0, {"error": str(getattr(ex, "reason", ex))}
+    try:
+        return status, json.loads(raw) if raw else None
+    except json.JSONDecodeError:
+        return status, None
+
+
+def fetch_remote(conn, tokens):
+    """Labs from one connection → (labs, error)."""
+    token = tokens.get(conn["name"])
+    if not token:
+        return [], f"not logged in — run: clab-status login {conn['name']}"
+    status, data = api_request(conn, "GET", "/api/v1/labs", token=token)
+    if status == 0:
+        return [], f"unreachable: {(data or {}).get('error', 'connection failed')}"
+    if status == 401:
+        return [], f"login expired — run: clab-status login {conn['name']}"
+    if status == 404:
+        return [], None  # some server versions answer 404 for "no labs"
+    if status != 200:
+        msg = (data or {}).get("error") if isinstance(data, dict) else None
+        return [], f"HTTP {status}" + (f": {msg}" if msg else "")
+    labs = normalize_clab(data if isinstance(data, dict) else {})
+    for lab in labs:
+        lab["id"] = f"remote:{conn['name']}:{lab['id']}"
+        lab["host"] = conn.get("group") or conn["name"]
+        lab["hostUrl"] = conn["url"]
+        lab["conn"] = conn["name"]
+        lab["apiUrl"] = conn["url"]
+        # Paths are on the remote machine: nothing to open or read locally.
+        lab["remote"] = True
+    return labs, None
+
+
+def fetch_netlab_ui(conn, tokens):
+    """netlab instances from a netlab-ui server (GET /api/lab/instances) →
+    (instances in `netlab status --all` shape, error)."""
+    status, data = api_request(conn, "GET", "/api/lab/instances", token=tokens.get(conn["name"]))
+    if status == 0:
+        return [], f"unreachable: {(data or {}).get('error', 'connection failed')}"
+    if status == 401:
+        return [], "unauthorized"
+    if status != 200 or not isinstance(data, list):
+        return [], f"HTTP {status}"
+    return [
+        {
+            "instance": str(i.get("id", "")),
+            "name": i.get("name", ""),
+            "dir": i.get("directory", ""),
+            "status": i.get("status", ""),
+            "providers": i.get("providers") or [],
+        }
+        for i in data
+        if isinstance(i, dict)
+    ], None
+
+
+def collect_remotes(conns, tokens, fetch_clab=None, fetch_nl=None):
+    """[(connection name, labs, error)]. Connections sharing a "group" are one
+    machine: its netlab-ui instances merge into its clab-api labs by directory,
+    so a netlab lab on containerlab is one card there too."""
+    fetch_clab = fetch_clab or fetch_remote
+    fetch_nl = fetch_nl or fetch_netlab_ui
+    results, groups = [], {}
+    for conn in conns:
+        if conn.get("type", "clab-api") == "clab-api":
+            labs, err = fetch_clab(conn, tokens)
+            results.append((conn["name"], labs, err))
+            groups.setdefault(conn.get("group") or conn["name"], []).extend(labs)
+    for conn in conns:
+        if conn.get("type") != "netlab-ui":
+            continue
+        instances, err = fetch_nl(conn, tokens)
+        group = conn.get("group") or conn["name"]
+        pool = groups.setdefault(group, [])
+        before = len(pool)
+        extra = {"host": group, "hostUrl": conn["url"], "remote": True, "uiUrl": conn["url"], "conn": conn["name"]}
+        merge_netlab(pool, instances, resolve=os.path.normpath, extra=extra, merged_extra={"uiUrl": conn["url"]})
+        for lab in pool[before:]:
+            lab["id"] = f"remote:{conn['name']}:{lab['id']}"
+        results.append((conn["name"], pool[before:], err))
+    return results
+
+
+def cmd_login(args):
+    """login <name> [<url> <username>] [--insecure] [--ca FILE]
+
+    Asks for the password on the terminal, trades it for a token and stores
+    only the token. With url/username it also adds or updates the connection.
+    """
+    import getpass
+
+    flags = {"--insecure"}
+    ca = flag_value(args, "--ca")
+    pos = [a for i, a in enumerate(args) if a not in flags and a != "--ca" and (i == 0 or args[i - 1] != "--ca")]
+    if not pos:
+        return usage()
+    conns = load_connections()
+    conn = next((c for c in conns if c["name"] == pos[0]), None)
+    if len(pos) >= 3:
+        conn = {"name": pos[0], "url": pos[1], "username": pos[2], "insecure": "--insecure" in args, "caFile": ca or ""}
+    if conn is None:
+        print(f"unknown connection {pos[0]!r}; use: clab-status login <name> <url> <username>", file=sys.stderr)
+        return 2
+    password = getpass.getpass(f"password for {conn['username']} @ {conn['url']}: ")
+    ok, err = login(conn, password)
+    if not ok:
+        print(f"login failed: {err}", file=sys.stderr)
+        return 1
+    print(f"logged in to {conn['name']}")
+    return 0
+
+
+def login(conn, password):
+    """Trade a password for a token and save connection + token (not the
+    password). Adds or replaces the connection by name. → (ok, error)."""
+    if conn.get("type", "clab-api") != "clab-api":
+        token = None  # netlab-ui has no login; just save the connection
+    else:
+        status, data = api_request(
+            conn,
+            "POST",
+            "/login",
+            body={"username": conn["username"], "password": password, "sessionDuration": SESSION_DURATION},
+        )
+        token = data.get("token") if isinstance(data, dict) else None
+        if status != 200 or not token:
+            err = (data or {}).get("error", "") if isinstance(data, dict) else ""
+            return False, f"{status or 'no connection'}" + (f": {err}" if err else "")
+    save_connections([c for c in load_connections() if c["name"] != conn["name"]] + [conn])
+    if token:
+        tokens = load_tokens()
+        tokens[conn["name"]] = token
+        save_tokens(tokens)
+    return True, ""
+
+
+def cmd_logout(args):
+    """logout <name> [--forget]: drop the token (and the connection)."""
+    if not args:
+        return usage()
+    tokens = load_tokens()
+    tokens.pop(args[0], None)
+    save_tokens(tokens)
+    if "--forget" in args:
+        save_connections([c for c in load_connections() if c["name"] != args[0]])
+    return 0
+
+
+# ── netlab ─────────────────────────────────────────────────────────────────────
+
+
+def netlab_instances(data):
+    """`netlab status --all` output → list of instance dicts.
+
+    No labs is {"warning": "No netlab-managed labs"} (exit code 1), which is an
+    empty result, not a failure.
+    """
+    if not isinstance(data, dict):
+        return []
+    out = []
+    for iid, entry in data.items():
+        if isinstance(entry, dict) and "dir" in entry:
+            out.append(dict(entry, instance=str(entry.get("instance", iid))))
+    return out
+
+
+def netlab_provider(p):
+    return "containerlab" if p == "clab" else p
+
+
+def realdir(path):
+    return os.path.realpath(path) if path else ""
+
+
+def merge_netlab(labs, instances, resolve=realdir, extra=None, merged_extra=None):
+    """Attach netlab instances to the containerlab lab in their directory.
+    `resolve` normalises paths (realpath locally, normpath for a remote host);
+    `extra` is merged into every lab this adds (remote host fields)."""
+    by_dir = {}
+    for lab in labs:
+        if lab["dir"]:
+            by_dir.setdefault(resolve(lab["dir"]), []).append(lab)
+
+    for inst in instances:
+        wdir = inst.get("dir", "")
+        providers = [netlab_provider(p) for p in inst.get("providers") or []]
+        matches = by_dir.get(resolve(wdir), [])
+        if len(matches) == 1:
+            lab = matches[0]
+            lab.update(
+                id=f"netlab:{inst['instance']}:{wdir}",
+                name=inst.get("name") or lab["name"],
+                managedBy="netlab",
+                providers=providers or lab["providers"],
+                dir=wdir,
+                status=inst.get("status", ""),
+                instance=inst["instance"],
+                startedAt=inst.get("timestamp", ""),
+                **(merged_extra or {}),
+            )
+            continue
+        # Nothing (or, ambiguously, more than one lab) in that directory: show
+        # the netlab instance on its own rather than guess which one it owns.
+        labs.append(
+            {
+                "id": f"netlab:{inst['instance']}:{wdir}",
+                "name": inst.get("name") or os.path.basename(wdir.rstrip("/")) or "netlab lab",
+                "managedBy": "netlab",
+                "providers": providers,
+                "topologyFile": "",
+                "dir": wdir,
+                "owner": "",
+                "status": inst.get("status", ""),
+                "instance": inst["instance"],
+                "startedAt": inst.get("timestamp", ""),
+                # Node state for non-containerlab providers needs a per-instance
+                # `netlab status -i`, which queries the provider; not polled yet.
+                "nodesKnown": False,
+                "nodes": [],
+                **(extra or {}),
+            }
+        )
+
+
+# ── Details (only while someone is looking) ─────────────────────────────────────
+#
+# Memory and per-node state for non-containerlab netlab labs cost a
+# `docker stats` / `netlab status -i` round trip each, so frontends only ask for
+# them (--details) while the popup is open.
+
+SIZE_UNITS = {
+    "B": 1,
+    "kB": 1000,
+    "KB": 1000,
+    "MB": 1000**2,
+    "GB": 1000**3,
+    "TB": 1000**4,
+    "KiB": 1024,
+    "MiB": 1024**2,
+    "GiB": 1024**3,
+    "TiB": 1024**4,
+}
+
+
+def parse_size(txt):
+    """'123.4MiB' / '1.2GB' (docker stats, netlab) → bytes, or None."""
+    txt = (txt or "").strip()
+    for unit in sorted(SIZE_UNITS, key=len, reverse=True):
+        if txt.endswith(unit):
+            try:
+                return int(float(txt[: -len(unit)]) * SIZE_UNITS[unit])
+            except ValueError:
+                return None
+    return None
+
+
+def parse_docker_stats(text):
+    """`docker stats --no-stream --format '{{json .}}'` → {container: bytes}."""
+    out = {}
+    for line in (text or "").splitlines():
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        used = parse_size((row.get("MemUsage") or "").split("/", 1)[0])
+        if row.get("Name") and used is not None:
+            out[row["Name"]] = used
+    return out
+
+
+def docker_memory():
+    try:
+        proc = subprocess.run(
+            ["docker", "stats", "--no-stream", "--format", "{{json .}}"],
+            capture_output=True,
+            text=True,
+            timeout=COMMAND_TIMEOUT,
+            stdin=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return {}
+    return parse_docker_stats(proc.stdout) if proc.returncode == 0 else {}
+
+
+def netlab_node_running(status):
+    status = (status or "").lower()
+    return status == "running" or status.startswith("up")
+
+
+def netlab_nodes(detail):
+    """`netlab status -i <id> --format json` → node list (managed nodes only)."""
+    nodes = []
+    for name, n in (detail.get("nodes") or {}).items():
+        if not isinstance(n, dict) or n.get("provider") == "unmanaged":
+            continue
+        status = n.get("status") or "unknown"
+        nodes.append(
+            {
+                "name": name,
+                "container": n.get("provider_name", ""),
+                "kind": n.get("device", ""),
+                "image": n.get("image", ""),
+                "group": "",
+                "state": status.lower(),
+                "status": status,
+                "running": netlab_node_running(status),
+                "ipv4": strip_prefix_len(n.get("mgmt")),
+                "ipv6": strip_prefix_len(n.get("mgmt6")),
+                "provider": netlab_provider(n.get("provider", "")),
+                "memoryBytes": parse_size(n.get("memory")),
+            }
+        )
+    return nodes
+
+
+def add_details(labs, fetch_memory, fetch_netlab):
+    """Fill in memory and non-clab netlab nodes. The fetchers are injected so
+    tests can feed saved output."""
+    for lab in labs:
+        if lab["managedBy"] == "netlab" and not lab["nodesKnown"] and lab.get("instance"):
+            detail = fetch_netlab(lab["instance"])
+            if detail:
+                lab["nodes"] = netlab_nodes(detail)
+                lab["nodesKnown"] = bool(lab["nodes"])
+    if any(n.get("container") for lab in labs for n in lab["nodes"]):
+        mem = fetch_memory()
+        for lab in labs:
+            for n in lab["nodes"]:
+                if n.get("memoryBytes") is None and n.get("container") in mem:
+                    n["memoryBytes"] = mem[n["container"]]
+    for lab in labs:
+        known = [n["memoryBytes"] for n in lab["nodes"] if n.get("memoryBytes") is not None]
+        # None, not 0, when nothing was measured: missing is not "uses no memory".
+        lab["memoryBytes"] = sum(known) if known else None
+        if not known:
+            lab["memoryCoverage"] = "none"
+        else:
+            lab["memoryCoverage"] = "full" if len(known) == len(lab["nodes"]) else "partial"
+
+
+def fetch_netlab_detail(instance):
+    data, err = run_json(["netlab", "status", "-i", str(instance), "--format", "json", "--memory"], ok_codes=(0, 1))
+    return data if err is None and isinstance(data, dict) and "nodes" in data else None
+
+
+# ── Uptime ─────────────────────────────────────────────────────────────────────
+#
+# Docker only gives a human status ("Up 3 hours", "Up About an hour"), which is
+# precise enough for "this lab has been running all day". netlab records a
+# timestamp when a lab starts.
+
+DURATION_UNITS = {
+    "second": 1,
+    "minute": 60,
+    "hour": 3600,
+    "day": 86400,
+    "week": 604800,
+    "month": 2592000,
+    "year": 31536000,
+}
+
+
+def docker_uptime(status):
+    """'Up 3 hours (healthy)' → 10800 seconds; None when not up / unknown."""
+    words = (status or "").lower().replace("(", " ").split()
+    if not words or words[0] != "up":
+        return None
+    words = words[1:]
+    if words[:3] == ["less", "than", "a"]:
+        return 0
+    if len(words) >= 2:
+        count = {"a": 1, "an": 1, "about": None}.get(words[0])
+        if words[0] == "about" and len(words) >= 3:
+            count, words = 1, words[1:]
+        if count is None:
+            try:
+                count = int(words[0])
+            except ValueError:
+                return None
+        unit = words[1].rstrip("s")
+        if unit in DURATION_UNITS:
+            return count * DURATION_UNITS[unit]
+    return None
+
+
+def netlab_uptime(timestamp, now):
+    """netlab's '2026-09-23 10:00:00[.ffffff]' (local time) → seconds since."""
+    try:
+        started = datetime.fromisoformat(str(timestamp))
+    except ValueError:
+        return None
+    if started.tzinfo is None:
+        started = started.astimezone()
+    return max(0, int((now - started).total_seconds()))
+
+
+def add_uptime(lab, now):
+    ups = [u for u in (docker_uptime(n.get("status")) for n in lab["nodes"]) if u is not None]
+    if lab.get("startedAt"):
+        up = netlab_uptime(lab["startedAt"], now)
+        if up is not None:
+            ups.append(up)
+    lab["uptimeSeconds"] = max(ups) if ups else None
+
+
+# ── Snapshot ───────────────────────────────────────────────────────────────────
+
+
+def lifecycle(lab):
+    if not lab["nodesKnown"]:
+        status = (lab.get("status") or "").lower()
+        if status == "started":
+            return "running"
+        if "start" in status or "deploy" in status or "config" in status:
+            return "starting"
+        return "unknown"
+    running = sum(1 for n in lab["nodes"] if n["running"])
+    if running == len(lab["nodes"]) and running > 0:
+        return "running"
+    if running == 0:
+        return "stopped"
+    return "partial"
+
+
+def natural_key(name):
+    """leaf2 before leaf10: digit runs compare as numbers."""
+    return [int(p) if p.isdigit() else p.lower() for p in re.split(r"(\d+)", name)]
+
+
+def finish(lab):
+    enrich_topology(lab)
+    default_icons(lab)
+    lab["nodes"].sort(key=lambda n: natural_key(n["name"]))
+    lab["running"] = sum(1 for n in lab["nodes"] if n["running"])
+    lab["total"] = len(lab["nodes"])
+    lab["lifecycle"] = lifecycle(lab)
+    lab["fingerprint"] = fingerprint(lab)
+    lab["actions"] = lab_actions(lab)
+    for node in lab["nodes"]:
+        node["access"] = node_access(lab, node)
+    return lab
+
+
+def node_access(lab, node):
+    """How the user can get onto a node (buttons in the node row):
+    "ssh" (clab ssh_config host), "connect" (`netlab connect`, any provider),
+    "exec" (docker shell) and "logs" (docker logs)."""
+    if lab.get("remote") or not node.get("running"):
+        return []
+    container_node = node.get("provider", "containerlab") == "containerlab"
+    out = []
+    if lab["managedBy"] == "netlab" and lab.get("dir"):
+        out.append("connect")
+    elif container_node and node["kind"] not in EXEC_KINDS:
+        out.append("ssh")
+    if container_node and node.get("container"):
+        out += ["exec", "logs"]
+    return out
+
+
+def fingerprint(lab):
+    """What the user saw when they clicked: owner, topology and containers. A
+    lifecycle action refuses to run if a fresh snapshot disagrees."""
+    parts = [lab["managedBy"], lab.get("topologyFile", ""), lab.get("dir", ""), lab.get("host", "")]
+    parts += sorted(n.get("container") or n["name"] for n in lab["nodes"])
+    return hashlib.sha1("\0".join(parts).encode()).hexdigest()[:16]
+
+
+def lab_actions(lab, which=shutil.which):
+    """Actions the frontends may offer. The backend re-checks before acting."""
+    acts = ["copy"]
+    if lab.get("remote"):
+        if lab.get("uiUrl") or (lab["managedBy"] == "containerlab" and any(which(b) for b in CLAB_DESKTOP_BINS)):
+            acts.append("open")
+        # clab-api-server can destroy a lab it lists; netlab-ui has no
+        # per-instance "down" we could call safely.
+        if lab["managedBy"] == "containerlab" and lab.get("apiUrl"):
+            acts.append("stop")
+        return acts
+    if lab.get("dir"):
+        acts.append("open")
+    if lab["nodesKnown"]:
+        acts.append("shell")
+    if (lab["managedBy"] == "containerlab" and lab.get("topologyFile")) or (
+        lab["managedBy"] == "netlab" and lab.get("dir")
+    ):
+        acts.append("stop")
+    return acts
+
+
+def build_snapshot(clab_data, clab_error, netlab_data, netlab_error, enabled, details=None, remotes=()):
+    """remotes: [(connection name, labs, error)], already fetched."""
+    sources = {}
+    labs = []
+
+    if enabled["containerlab"]:
+        sources["containerlab"] = source_state(clab_error)
+        if clab_error is None:
+            labs = normalize_clab(clab_data)
+
+    if enabled["netlab"]:
+        sources["netlab"] = source_state(netlab_error)
+        if netlab_error is None:
+            merge_netlab(labs, netlab_instances(netlab_data))
+
+    for name, rlabs, rerr in remotes or ():
+        sources[f"remote:{name}"] = source_state(rerr)
+        labs.extend(rlabs)
+
+    if details is not None:
+        details([lab for lab in labs if not lab.get("remote")])
+
+    now = datetime.now(timezone.utc)
+    for lab in labs:
+        add_uptime(lab, now)
+    labs = sorted((finish(lab) for lab in labs), key=lambda lab: (lab["name"], lab["id"]))
+    attention = sum(1 for lab in labs if lab["lifecycle"] in ("partial", "stopped"))
+    return {
+        "schemaVersion": SCHEMA_VERSION,
+        "observedAt": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "sources": sources,
+        "labs": labs,
+        "totals": {
+            "labs": len(labs),
+            "nodes": sum(lab["total"] for lab in labs),
+            "running": sum(lab["running"] for lab in labs),
+            "attention": attention,
+        },
+        "details": details is not None,
+    }
+
+
+def source_state(error):
+    if error == "not-installed":
+        return {"available": False, "error": ""}
+    return {"available": error is None, "error": error or ""}
+
+
+def take_snapshot(args):
+    enabled = {
+        "containerlab": "--no-containerlab" not in args,
+        "netlab": "--no-netlab" not in args,
+    }
+    # The env vars let a frontend run on saved output (demo/screenshots).
+    clab_file = flag_value(args, "--clab-json") or os.environ.get("CLAB_WIDGET_CLAB_JSON")
+    netlab_file = flag_value(args, "--netlab-json") or os.environ.get("CLAB_WIDGET_NETLAB_JSON")
+
+    clab_data = clab_error = netlab_data = netlab_error = None
+    if enabled["containerlab"]:
+        if clab_file:
+            clab_data, clab_error = read_json_file(clab_file)
+        else:
+            clab_data, clab_error = run_json(["containerlab", "inspect", "--all", "--format", "json"])
+    if enabled["netlab"]:
+        if netlab_file:
+            netlab_data, netlab_error = read_json_file(netlab_file)
+        else:
+            netlab_data, netlab_error = run_json(["netlab", "status", "--all", "--format", "json"], ok_codes=(0, 1))
+
+    details = None
+    if "--details" in args:
+        if clab_file or netlab_file:
+            # Saved output: no live docker/netlab to ask, only what the files hold.
+            details = lambda labs: add_details(labs, dict, lambda _i: None)  # noqa: E731
+        else:
+            details = lambda labs: add_details(labs, docker_memory, fetch_netlab_detail)  # noqa: E731
+
+    remotes = []
+    if "--no-remote" not in args and not (clab_file or netlab_file):
+        remotes = collect_remotes(load_connections(), load_tokens())
+
+    return build_snapshot(clab_data, clab_error, netlab_data, netlab_error, enabled, details, remotes)
+
+
+def cmd_snapshot(args):
+    json.dump(take_snapshot(args), sys.stdout)
+    sys.stdout.write("\n")
+    return 0
+
+
+def flag_value(args, flag):
+    if flag in args:
+        i = args.index(flag)
+        if i + 1 < len(args):
+            return args[i + 1]
+    return None
+
+
+# ── Actions ────────────────────────────────────────────────────────────────────
+
+
+def spawn(argv):
+    """Start argv detached. Plans say "xdg-open"; on macOS/Windows that
+    becomes `open` / the shell's default handler."""
+    if argv and argv[0] == "xdg-open" and not shutil.which("xdg-open"):
+        if sys.platform == "darwin":
+            argv = ["open", *argv[1:]]
+        elif os.name == "nt":
+            os.startfile(argv[1])  # noqa: S606 — a folder or http(s) URL from our own plan
+            return
+    kwargs = {"start_new_session": True} if os.name == "posix" else {"creationflags": 0x00000008}  # DETACHED_PROCESS
+    subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **kwargs)
+
+
+# Neither app has an "open this lab" entry point (checked 2026-09: the
+# containerlab desktop app is single-instance with no argv/URL handling, the VS
+# Code extension registers no URI handler, netlab-ui has no lab route), so
+# "open" launches or focuses the right tool and lets the user pick the lab.
+CLAB_DESKTOP_BINS = ("containerlab-desktop",)
+NETLAB_UI_BINS = ("netlab-ui-desktop", "netlab-ui")
+NETLAB_UI_DEFAULT_URL = "http://localhost:8000"
+EDITOR_BINS = ("code", "codium")
+
+
+def netlab_ui_url():
+    """Server URL the netlab-ui desktop app is configured for (Electron keeps
+    it in ~/.config/<app>/config.json), overridable with $CLAB_WIDGET_NETLAB_UI_URL."""
+    env = os.environ.get("CLAB_WIDGET_NETLAB_UI_URL")
+    if env:
+        return env
+    base = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
+    for app in ("netlab-ui-desktop", "netlab-ui"):
+        url = read_optional_json(os.path.join(base, app, "config.json")).get("serverUrl")
+        if isinstance(url, str) and url.startswith(("http://", "https://")):
+            return url
+    return NETLAB_UI_DEFAULT_URL
+
+
+def http_ok(url, timeout=1.5):
+    import urllib.request
+
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as resp:  # noqa: S310 — http(s) only, checked above
+            return 200 <= resp.status < 300
+    except (OSError, ValueError):
+        return False
+
+
+def open_plan(managed_by, topology_file, lab_dir, which, netlab_ui_healthy):
+    """argv that opens the lab in the best available tool. Pure, for tests:
+    `which` resolves a binary name, `netlab_ui_healthy` returns the URL of a
+    responding netlab-ui server or None."""
+    folder = lab_dir or (os.path.dirname(topology_file) if topology_file else "")
+
+    def first(bins):
+        for b in bins:
+            exe = which(b)
+            if exe:
+                return exe
+        return None
+
+    if managed_by == "containerlab":
+        exe = first(CLAB_DESKTOP_BINS)
+        if exe:
+            return [exe]
+    if managed_by == "netlab":
+        url = netlab_ui_healthy()
+        if url:
+            exe = first(NETLAB_UI_BINS)
+            return [exe] if exe else ["xdg-open", url]
+    editor = first(EDITOR_BINS)
+    if editor and folder:
+        # Folder as workspace + the topology file, so the containerlab
+        # extension's explorer and TopoViewer pick the lab up.
+        return [editor, folder] + ([topology_file] if topology_file and os.path.isfile(topology_file) else [])
+    return ["xdg-open", folder] if folder else None
+
+
+def remote_open_plan(managed_by, ui_url, which):
+    """Remote lab: the containerlab desktop app (it talks to clab-api-server)
+    or the netlab-ui that reported it."""
+    if ui_url:
+        for b in NETLAB_UI_BINS:
+            if which(b):
+                return [which(b)]
+        return ["xdg-open", ui_url]
+    if managed_by == "containerlab":
+        for b in CLAB_DESKTOP_BINS:
+            if which(b):
+                return [which(b)]
+        if sys.platform == "darwin" and os.path.isdir("/Applications/Containerlab.app"):
+            return ["open", "-a", "Containerlab"]
+    return None
+
+
+def cmd_open(args):
+    """open <managedBy> <topologyFile> <labDir> [--remote [--ui URL]]"""
+    if "--remote" in args:
+        argv = remote_open_plan(args[0] if args else "", flag_value(args, "--ui"), shutil.which)
+        if argv:
+            spawn(argv)
+        return 0 if argv else 1
+    if len(args) == 1:
+        args = ["", args[0] if os.path.isfile(args[0]) else "", args[0] if os.path.isdir(args[0]) else ""]
+    if len(args) < 3:
+        return usage()
+
+    def netlab_ui_healthy():
+        url = netlab_ui_url()
+        return url if http_ok(url.rstrip("/") + "/api/health") else None
+
+    argv = open_plan(args[0], args[1], args[2], shutil.which, netlab_ui_healthy)
+    if argv is None:
+        return 1
+    spawn(argv)
+    return 0
+
+
+TERMINALS = [
+    # (binary, args placed before the command)
+    ("konsole", ["-e"]),
+    ("kitty", []),
+    ("foot", []),
+    ("alacritty", ["-e"]),
+    ("wezterm", ["start", "--"]),
+    ("ghostty", ["-e"]),
+    ("gnome-terminal", ["--"]),
+    ("xterm", ["-e"]),
+]
+
+
+def find_terminal():
+    preferred = os.environ.get("TERMINAL", "")
+    for exe, prefix in TERMINALS:
+        if preferred and os.path.basename(preferred) == exe and shutil.which(preferred):
+            return [preferred] + prefix
+    for exe, prefix in TERMINALS:
+        path = shutil.which(exe)
+        if path:
+            return [path] + prefix
+    return None
+
+
+def shell_plan(mode, kind, container, node="", lab_dir="", env=None, which=shutil.which):
+    """argv for a node terminal, or None. Pure, for tests."""
+    env = os.environ if env is None else env
+    key = kind.upper().replace("-", "_")
+    if mode == "ssh":
+        user = env.get(f"CLAB_WIDGET_SSH_USER_{key}") or SSH_USERS.get(kind)
+        return ["ssh", f"{user}@{container}" if user else container]
+    if mode == "connect":
+        # netlab knows each node's address, user and provider (clab or VM).
+        netlab = which("netlab") or "netlab"
+        return ["sh", "-c", 'cd "$1" && exec "$2" connect "$3"', "sh", lab_dir, netlab, node]
+    if mode == "exec":
+        cmd = env.get(f"CLAB_WIDGET_EXEC_{key}") or EXEC_CMD.get(kind)
+        if cmd:
+            return ["docker", "exec", "-it", container, *cmd.split()]
+        return ["docker", "exec", "-it", container, "sh", "-c", "command -v bash >/dev/null && exec bash || exec sh"]
+    if mode == "logs":
+        return ["docker", "logs", "-f", "--tail", "200", container]
+    return None
+
+
+def cmd_shell(args):
+    """shell <ssh|connect|exec|logs> <kind> <container> [<node> <labDir>]
+    (old form: shell <kind> <container> → ssh, or exec for plain containers)"""
+    if len(args) == 2:
+        args = ["exec" if args[0] in EXEC_KINDS else "ssh", *args]
+    if len(args) < 3:
+        return usage()
+    mode, kind, container = args[:3]
+    node = args[3] if len(args) > 3 else ""
+    lab_dir = args[4] if len(args) > 4 else ""
+    argv = shell_plan(mode, kind, container, node, lab_dir)
+    term = find_terminal()
+    if argv is None or term is None:
+        print("no terminal emulator found" if argv else f"unknown mode {mode}", file=sys.stderr)
+        return 1
+    spawn(term + argv)
+    return 0
+
+
+def stop_plan(lab, which=shutil.which, in_admin_group=None):
+    """How to stop a local lab: argv to run in a terminal, via its owner.
+
+    containerlab needs root (or clab_admins membership); sudo resets PATH on
+    NixOS and most distros, so the binary goes by absolute path."""
+    if lab["managedBy"] == "netlab":
+        netlab = which("netlab") or "netlab"
+        return ["sh", "-c", 'cd "$1" && "$2" down', "sh", lab["dir"], netlab], lab["dir"]
+    clab = which("containerlab") or "containerlab"
+    if in_admin_group is None:
+        in_admin_group = getattr(os, "geteuid", lambda: -1)() == 0 or "clab_admins" in group_names()
+    cmd = [clab, "destroy", "-t", lab["topologyFile"]]
+    return (cmd if in_admin_group else ["sudo", *cmd]), os.path.dirname(lab["topologyFile"])
+
+
+def group_names():
+    try:
+        import grp
+    except ImportError:  # Windows
+        return set()
+    try:
+        return {grp.getgrgid(g).gr_name for g in os.getgroups()}
+    except (KeyError, OSError):
+        return set()
+
+
+def check_stop(snap, lab_id, expected):
+    """(lab, None) when the lab still looks like what the user confirmed,
+    else (None, reason)."""
+    lab = next((lab for lab in snap["labs"] if lab["id"] == lab_id), None)
+    if lab is None:
+        return None, "it is no longer running"
+    if lab["fingerprint"] != expected:
+        return None, "it changed since the widget last refreshed — look again and retry"
+    if "stop" not in lab["actions"]:
+        return None, "stopping it isn't supported from here"
+    return lab, None
+
+
+def remote_destroy(conn, token, clab_name):
+    """DELETE /api/v1/labs/<name> (no cleanup: node configs stay) → (ok, detail)."""
+    import urllib.parse
+
+    status, data = api_request(conn, "DELETE", "/api/v1/labs/" + urllib.parse.quote(clab_name, safe=""), token=token)
+    if 200 <= status < 300:
+        return True, ""
+    if status == 0:
+        return False, "unreachable"
+    err = data.get("error") if isinstance(data, dict) else None
+    return False, err or f"HTTP {status}"
+
+
+def cmd_stop(args):
+    """stop <labId> <fingerprint>: tear a lab down through its owner, after
+    re-checking it is still the lab the user confirmed."""
+    if len(args) < 2:
+        return usage()
+    snap = take_snapshot(["--no-remote"] if not args[0].startswith("remote:") else [])
+    lab, reason = check_stop(snap, args[0], args[1])
+    if lab is None:
+        cmd_notify(["Lab not stopped", f"{args[0].split(':')[-1]}: {reason}"])
+        return 3
+    if lab.get("remote"):
+        conn = next((c for c in load_connections() if c["name"] == lab.get("conn")), None)
+        token = load_tokens().get(lab.get("conn", ""))
+        if conn is None or not token:
+            cmd_notify([f"{lab['name']} not stopped", "remote login missing"])
+            return 1
+        ok, detail = remote_destroy(conn, token, lab["clabName"])
+        title = f"{lab['name']} destroyed" if ok else f"{lab['name']} not stopped"
+        cmd_notify([title, f"on {lab['host']}" + (f": {detail}" if detail else "")])
+        return 0 if ok else 1
+    argv, cwd = stop_plan(lab)
+    term = find_terminal()
+    if term is None:
+        cmd_notify([f"{lab['name']} not stopped", "no terminal emulator found"])
+        return 1
+    # A terminal, so sudo can prompt and the output stays readable.
+    script = r'cd "$1" 2>/dev/null; shift; echo "\$ $*"; "$@"; echo; printf "done — press Enter to close"; read _'
+    spawn(term + ["sh", "-c", script, "sh", cwd or "/", *argv])
+    return 0
+
+
+APP_ICON = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "..", "icons", "app", "org.muddyblack.clabWidget-128.png"
+)
+
+
+def cmd_notify(args):
+    """Desktop notification via notify-send, or the freedesktop D-Bus API
+    directly when libnotify's CLI isn't installed."""
+    if len(args) < 2:
+        return usage()
+    title, body = args[0], args[1]
+    icon = os.path.normpath(APP_ICON)
+    if shutil.which("notify-send"):
+        spawn(["notify-send", "--app-name=CLAB Widget", f"--icon={icon}", title, body])
+        return 0
+    if shutil.which("gdbus"):
+        spawn(
+            [
+                "gdbus", "call", "--session",
+                "--dest", "org.freedesktop.Notifications",
+                "--object-path", "/org/freedesktop/Notifications",
+                "--method", "org.freedesktop.Notifications.Notify",
+                "CLAB Widget", "0", icon, title, body, "[]", "{}", "-1",
+            ]
+        )  # fmt: skip
+        return 0
+    print("no notify-send or gdbus found", file=sys.stderr)
+    return 1
+
+
+def usage():
+    print(__doc__.split("\n\n")[1], file=sys.stderr)
+    return 2
+
+
+def main(argv):
+    if not argv:
+        return usage()
+    cmd, rest = argv[0], argv[1:]
+    if cmd == "snapshot":
+        return cmd_snapshot(rest)
+    if cmd == "open":
+        return cmd_open(rest)
+    if cmd == "shell":
+        return cmd_shell(rest)
+    if cmd == "notify":
+        return cmd_notify(rest)
+    if cmd == "stop":
+        return cmd_stop(rest)
+    if cmd == "login":
+        return cmd_login(rest)
+    if cmd == "logout":
+        return cmd_logout(rest)
+    return usage()
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

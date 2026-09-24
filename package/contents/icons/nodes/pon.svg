@@ -1,0 +1,26 @@
+<svg
+                            xmlns:xlink="http://www.w3.org/1999/xlink"
+                            xmlns="http://www.w3.org/2000/svg"
+                            xml:space="preserve"
+                            style="enable-background:new 0 0 120 120;"
+                            viewBox="0 0 120 120"
+                            y="0px"
+                            x="0px"
+                            id="Layer_1"
+                            version="1.1"
+                            width="120px"
+                            height="120px"
+                            fill="none"
+                        >
+                            <style type="text/css">
+                                .st0 { fill: #005aff; }
+                                .st1 { fill: none; stroke: #FFFFFF; stroke-width: 4; stroke-linecap: round; stroke-linejoin: round; stroke-miterlimit: 10; }
+                                .st2 { fill: #FFFFFF; stroke: #FFFFFF; stroke-width: 4; stroke-miterlimit: 10; }
+                            </style>
+                            <rect height="120" width="120" class="st0" />
+                            <g>
+                                <polyline points="20.9,20 97,60 20.9,100" class="st1" />
+                                <line x1="20.9" y1="60" x2="73.8" y2="60" class="st1" />
+                                <circle cx="95.1" cy="60" r="3" class="st2" />
+                            </g>
+                        </svg>

@@ -1,0 +1,44 @@
+name: Node kind / topology idea
+description: Suggest support for a network device kind, node role icon, or topology map feature.
+title: "[Topology / Node]: "
+body:
+  - type: input
+    id: kind_name
+    attributes:
+      label: Device kind / NOS / role name
+      description: Name of the network operating system, container image, or node kind (e.g. Arista cEOS, Nokia SR Linux, Cisco XRv9k, SONiC, VyOS, OpenWrt).
+      placeholder: e.g. Arista cEOS (ceos)
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: What would you like to add or improve?
+      options:
+        - Node role icon (bridge, switch, leaf, spine, client, etc.)
+        - Device kind auto-detection & default icon mapping
+        - Topology map layout & link rendering
+        - Interface / link labeling and badges
+        - Node quick-action (web console, SSH, telnet)
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: Describe how the node kind or topology feature should work and appear in the UI.
+    validations:
+      required: true
+  - type: textarea
+    id: references
+    attributes:
+      label: Visual references or sample topology
+      description: Add SVG/PNG icon links, diagrams, or a sanitized `.clab.yml` / netlab `topology.yml` snippet.
+  - type: checkboxes
+    id: contribution
+    attributes:
+      label: Contribution
+      options:
+        - label: I have access to this device kind/image and can test it
+        - label: I can provide an SVG icon or test topology

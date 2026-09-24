@@ -1,0 +1,23 @@
+repos:
+  - repo: local
+    hooks:
+      - id: qmlformat
+        name: qmlformat
+        entry: nix develop --command qmlformat
+        args: ["-i"]
+        language: system
+        files: \.qml$
+        # Copied from Glassy System Monitor; formatted there.
+        exclude: ^package/contents/ui/shared/(card/|GlassCard\.qml)
+
+      - id: ruff
+        name: ruff check
+        entry: nix develop --command ruff check --fix
+        language: system
+        files: (\.py$|^package/contents/tools/clab-status$)
+
+      - id: ruff-format
+        name: ruff format
+        entry: nix develop --command ruff format
+        language: system
+        files: (\.py$|^package/contents/tools/clab-status$)

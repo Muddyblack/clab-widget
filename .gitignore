@@ -1,0 +1,18 @@
+result
+.direnv/
+.envrc
+__pycache__/
+*.plasmoid
+# containerlab runtime dirs from the test lab
+clab-*/
+.netlab*
+# files `netlab up` generates when run in tests/lab/netlab
+tests/lab/netlab/*
+!tests/lab/netlab/topology.yml
+# Build output (make pack, PyInstaller, installer)
+*.plasmoid
+dist/
+build/
+CLAB-Widget-Setup-*.exe
+clab-widget-*.zip
+clab-widget-*.dmg

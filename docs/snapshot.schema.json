@@ -1,0 +1,110 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Muddyblack/clab-widget/docs/snapshot.schema.json",
+  "title": "CLAB Widget snapshot",
+  "description": "Output of `clab-status snapshot`: every lab on this host (and configured remote hosts), normalised from containerlab and netlab. Frontends render it as-is. Additive changes keep schemaVersion 1; readers must ignore unknown fields.",
+  "type": "object",
+  "required": ["schemaVersion", "observedAt", "sources", "labs", "totals"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "observedAt": { "type": "string", "format": "date-time" },
+    "details": { "type": "boolean", "description": "Memory / per-node netlab state were collected (--details)." },
+    "error": { "type": "string" },
+    "sources": {
+      "type": "object",
+      "description": "containerlab, netlab, and remote:<connection> for each remote host.",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["available", "error"],
+        "properties": {
+          "available": { "type": "boolean" },
+          "error": { "type": "string", "description": "Empty when fine; a missing tool is available=false with no error." }
+        }
+      }
+    },
+    "totals": {
+      "type": "object",
+      "required": ["labs", "nodes", "running", "attention"],
+      "properties": {
+        "labs": { "type": "integer", "minimum": 0 },
+        "nodes": { "type": "integer", "minimum": 0 },
+        "running": { "type": "integer", "minimum": 0 },
+        "attention": { "type": "integer", "minimum": 0, "description": "Labs that are partial or stopped." }
+      }
+    },
+    "labs": { "type": "array", "items": { "$ref": "#/$defs/lab" } }
+  },
+  "$defs": {
+    "lifecycle": { "enum": ["running", "partial", "stopped", "starting", "unknown"] },
+    "lab": {
+      "type": "object",
+      "required": ["id", "name", "managedBy", "providers", "dir", "nodesKnown", "nodes", "running", "total", "lifecycle", "fingerprint", "actions", "links"],
+      "properties": {
+        "id": { "type": "string", "description": "Stable across redeploys: clab:<topology path>, netlab:<instance>:<dir>, remote:<conn>:… (pins use it)." },
+        "name": { "type": "string" },
+        "clabName": { "type": "string" },
+        "managedBy": { "enum": ["containerlab", "netlab"] },
+        "providers": { "type": "array", "items": { "type": "string" } },
+        "topologyFile": { "type": "string" },
+        "dir": { "type": "string" },
+        "owner": { "type": "string" },
+        "status": { "type": "string", "description": "netlab's own status text." },
+        "instance": { "type": "string" },
+        "startedAt": { "type": "string" },
+        "nodesKnown": { "type": "boolean", "description": "false: node state not collected (netlab on a VM provider without --details)." },
+        "nodes": { "type": "array", "items": { "$ref": "#/$defs/node" } },
+        "links": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["a", "z"],
+            "properties": {
+              "a": { "type": "string" }, "aIf": { "type": "string" },
+              "z": { "type": "string" }, "zIf": { "type": "string" }
+            }
+          }
+        },
+        "running": { "type": "integer", "minimum": 0 },
+        "total": { "type": "integer", "minimum": 0 },
+        "lifecycle": { "$ref": "#/$defs/lifecycle" },
+        "uptimeSeconds": { "type": ["integer", "null"], "minimum": 0 },
+        "memoryBytes": { "type": ["integer", "null"], "minimum": 0, "description": "null = not measured (never 0 for unknown)." },
+        "memoryCoverage": { "enum": ["full", "partial", "none"] },
+        "fingerprint": { "type": "string", "description": "Owner + topology + containers; lifecycle actions refuse to run if it changed." },
+        "actions": { "type": "array", "items": { "enum": ["copy", "open", "shell", "stop"] } },
+        "remote": { "type": "boolean" },
+        "host": { "type": "string" },
+        "hostUrl": { "type": "string" },
+        "apiUrl": { "type": "string" },
+        "uiUrl": { "type": "string" },
+        "conn": { "type": "string" }
+      }
+    },
+    "node": {
+      "type": "object",
+      "required": ["name", "container", "kind", "state", "running", "ipv4", "ipv6", "role", "icon", "access"],
+      "properties": {
+        "name": { "type": "string" },
+        "container": { "type": "string" },
+        "kind": { "type": "string" },
+        "image": { "type": "string" },
+        "group": { "type": "string" },
+        "state": { "type": "string" },
+        "status": { "type": "string" },
+        "running": { "type": "boolean" },
+        "ipv4": { "type": "string" },
+        "ipv6": { "type": "string" },
+        "provider": { "type": "string" },
+        "memoryBytes": { "type": ["integer", "null"], "minimum": 0 },
+        "role": { "enum": ["pe", "dcgw", "leaf", "switch", "spine", "super-spine", "server", "pon", "controller", "rgw", "ue", "cloud", "client", "bridge"] },
+        "icon": { "type": "string", "description": "Absolute path to the node's clab-ui role SVG." },
+        "position": {
+          "type": "object",
+          "required": ["x", "y"],
+          "properties": { "x": { "type": "number" }, "y": { "type": "number" } }
+        },
+        "access": { "type": "array", "items": { "enum": ["ssh", "connect", "exec", "logs"] } }
+      }
+    }
+  }
+}

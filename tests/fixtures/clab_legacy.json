@@ -1,0 +1,1 @@
+{"containers": [{"lab_name": "old", "labPath": "/srv/old.clab.yml", "name": "clab-old-n1", "kind": "linux", "state": "running", "ipv4_address": "172.20.20.9/24"}]}

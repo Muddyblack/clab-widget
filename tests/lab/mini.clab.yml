@@ -1,0 +1,23 @@
+# Smallest useful containerlab lab: two Alpine hosts, one link. No vendor
+# images, pulls in seconds. Used by tests/integration.sh.
+name: clabw-mini
+
+# Own management network: containerlab's default 172.20.20.0/24 often collides
+# with other Docker networks (kind uses 172.20.0.0/16).
+mgmt:
+  network: clabw-mini-mgmt
+  ipv4-subnet: 10.123.10.0/24
+  ipv6-subnet: fd00:c1ab:10::/64
+
+topology:
+  nodes:
+    h1:
+      kind: linux
+      image: alpine:3
+      cmd: sleep infinity
+    h2:
+      kind: linux
+      image: alpine:3
+      cmd: sleep infinity
+  links:
+    - endpoints: ["h1:eth1", "h2:eth1"]

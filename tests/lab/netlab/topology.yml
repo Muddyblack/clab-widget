@@ -1,0 +1,11 @@
+# Smallest netlab lab on the containerlab provider: two FRR routers running
+# OSPF. Exercises the netlab ↔ containerlab merge in tests/integration.sh.
+provider: clab
+defaults.device: frr
+module: [ ospf ]
+
+# Own management subnet, clear of other Docker networks.
+addressing.mgmt.ipv4: 10.123.20.0/24
+
+nodes: [ r1, r2 ]
+links: [ r1-r2 ]

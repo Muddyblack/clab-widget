@@ -1,0 +1,28 @@
+<svg
+                        xmlns:xlink="http://www.w3.org/1999/xlink"
+                        xmlns="http://www.w3.org/2000/svg"
+                        xml:space="preserve"
+                        style="enable-background:new 0 0 120 120;"
+                        viewBox="0 0 120 120"
+                        y="0px"
+                        x="0px"
+                        id="Layer_1"
+                        version="1.1"
+                        width="120px"
+                        height="120px"
+                        fill="none"
+                    >
+                        <style type="text/css">
+                            .st0 { fill: #005aff; }
+                            .st1 { fill: none; stroke: #FFFFFF; stroke-width: 4; stroke-linecap: round; stroke-linejoin: round; stroke-miterlimit: 10; }
+                        </style>
+                        <rect height="120" width="120" class="st0" />
+                        <g>
+                            <path
+                                class="st1"
+                                d="M20,70.9c0.6,8,7.8,14.6,16.2,14.6h42.9c7.1,0,13.9-3.6,17.8-9.5c7.8-11.6,0-28.6-13.9-30.8
+                                c-1.9-0.2-3.5-0.2-5.4,0l-2,0.2c-1.5,0.2-3-0.5-3.7-2c-3.2-5.8-9.8-9.6-17.3-8.7c-7.8,0.9-15.1,7.2-15.1,14.9v1.3
+                                c0,2-1.7,3.6-3.7,3.6h-0.2C26.7,54.5,19.4,62,20,70.9z"
+                            />
+                        </g>
+                    </svg>

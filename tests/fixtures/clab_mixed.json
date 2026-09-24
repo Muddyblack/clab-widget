@@ -1,0 +1,14 @@
+{
+  "dc": [
+    {"lab_name": "dc", "labPath": "dc/dc.clab.yml", "absLabPath": "/home/u/labs/dc/dc.clab.yml", "name": "clab-dc-spine1", "container_id": "a1", "image": "ghcr.io/nokia/srlinux:25.3", "kind": "nokia_srlinux", "state": "running", "status": "Up 2 hours", "ipv4_address": "172.20.20.2/24", "ipv6_address": "3fff:172:20:20::2/64", "owner": "u"},
+    {"lab_name": "dc", "labPath": "dc/dc.clab.yml", "absLabPath": "/home/u/labs/dc/dc.clab.yml", "name": "clab-dc-leaf1", "container_id": "a2", "image": "ghcr.io/nokia/srlinux:25.3", "kind": "nokia_srlinux", "state": "running", "status": "Up 2 hours", "ipv4_address": "172.20.20.3/24", "ipv6_address": "N/A", "owner": "u"}
+  ],
+  "lab1": [
+    {"lab_name": "lab1", "absLabPath": "/home/u/a/lab1.clab.yml", "name": "clab-lab1-h1", "image": "alpine", "kind": "linux", "state": "running", "status": "Up", "ipv4_address": "172.20.20.10/24", "owner": "u"},
+    {"lab_name": "lab1", "absLabPath": "/home/u/b/lab1.clab.yml", "name": "clab-lab1-h1", "image": "alpine", "kind": "linux", "state": "exited", "status": "Exited (0)", "ipv4_address": "N/A", "owner": "u"}
+  ],
+  "nl": [
+    {"lab_name": "nl", "absLabPath": "/home/u/netlab/nl/clab.yml", "name": "clab-nl-r1", "image": "quay.io/frrouting/frr:10.7.1", "kind": "linux", "state": "running", "status": "Up", "ipv4_address": "192.168.121.101/24", "owner": "u"},
+    {"lab_name": "nl", "absLabPath": "/home/u/netlab/nl/clab.yml", "name": "clab-nl-r2", "image": "quay.io/frrouting/frr:10.7.1", "kind": "linux", "state": "exited", "status": "Exited (137)", "ipv4_address": "", "owner": "u"}
+  ]
+}

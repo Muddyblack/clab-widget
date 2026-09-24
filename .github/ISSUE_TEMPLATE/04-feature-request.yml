@@ -1,0 +1,40 @@
+name: Feature / UI idea
+description: Suggest a new feature, panel pill style, topology view, or desktop enhancement.
+title: "[Feature]: "
+body:
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Panel pill / tray indicator / status bar
+        - Lab cards & node list
+        - Topology view & interactive diagram
+        - Node actions & terminal integration (SSH / exec)
+        - Remote hosts & multi-server management
+        - Notifications & unattended lab reminders
+        - Desktop integration (KDE Plasma, Hyprland, Windows/macOS tray)
+        - Settings & appearance
+        - Backend tool (clab-status / run)
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would you like to do?
+      description: Describe the feature or improvement and how it helps your lab workflows.
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: How should it work?
+      description: Describe the desired behavior, visual layout, animations, or settings. Mention Plasma, Hyprland, macOS, Windows, or CLI if specific to one.
+    validations:
+      required: true
+  - type: textarea
+    id: examples
+    attributes:
+      label: Visual references, mockups, or prototypes
+      description: Share sketches, screenshots, GIFs, design references, or sample commands. If you have a workaround, describe it here.

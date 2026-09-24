@@ -1,0 +1,3 @@
+# Runtime for the tray app (desktop/app.py). The backend itself is
+# standard-library only.
+PySide6-Essentials>=6.8

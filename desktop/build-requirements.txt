@@ -1,0 +1,8 @@
+# Exact versions for the .exe / .app that CI builds and releases ship, so a
+# release rebuilt from its tag gets the same Qt and bootloader. Keep them
+# inside desktop/requirements.txt's ranges and bump them on purpose.
+PySide6-Essentials==6.11.2
+shiboken6==6.11.2
+pyinstaller==6.22.2
+pyinstaller-hooks-contrib==2026.7
+pillow==12.3.0

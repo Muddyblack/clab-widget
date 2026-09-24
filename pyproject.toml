@@ -1,0 +1,6 @@
+[tool.ruff]
+line-length = 120
+include = ["package/contents/tools/clab-status", "tests/*.py", "desktop/*.py", "tools/*.py"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]

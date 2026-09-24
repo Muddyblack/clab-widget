@@ -1,0 +1,13 @@
+{
+  "dir": "/home/u/netlab/vmlab",
+  "name": "vmlab",
+  "status": "started",
+  "providers": ["libvirt"],
+  "topology": "topology.yml",
+  "nodes": {
+    "r1": {"device": "frr", "image": "bento/frr", "mgmt": "192.168.121.101", "connection": "paramiko", "provider": "libvirt", "provider_name": "vmlab_r1", "status": "running", "memory": "512.0MiB"},
+    "r2": {"device": "frr", "image": "bento/frr", "mgmt": "192.168.121.102", "connection": "paramiko", "provider": "libvirt", "provider_name": "vmlab_r2", "status": "shutoff"},
+    "ext": {"device": "none", "image": "unmanaged", "provider": "unmanaged", "status": "Unknown"}
+  },
+  "memory": "512.0MiB"
+}

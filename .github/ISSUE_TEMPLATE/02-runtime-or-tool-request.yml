@@ -1,0 +1,51 @@
+name: Lab runtime / tool integration request
+description: Suggest support for a new network lab runtime, container engine, or remote API server.
+title: "[Integration]: "
+body:
+  - type: input
+    id: tool_name
+    attributes:
+      label: Tool or runtime name and repository
+      description: Name of the networking tool or runtime and link to its documentation or repository.
+      placeholder: e.g. Kathará (https://github.com/KatharaFramework/Kathara)
+    validations:
+      required: true
+  - type: dropdown
+    id: category
+    attributes:
+      label: Integration type / category
+      options:
+        - Container / VM lab runtime (e.g. Kathará, KNE, GNS3, EVE-NG)
+        - Container engine / runtime (Docker, Podman, nerdctl, containerd)
+        - Remote lab API server or web UI backend
+        - Network device CLI / terminal helper
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: capabilities
+    attributes:
+      label: What lab and node metrics/data does it expose?
+      description: Describe what data can be queried (e.g. running labs, node status, management IPs, memory/CPU usage, links/interconnects).
+      placeholder: "Lab list, node states (running/stopped), IPv4/IPv6 management addresses, and node memory consumption."
+    validations:
+      required: true
+  - type: textarea
+    id: cli_api_info
+    attributes:
+      label: CLI commands or API endpoints
+      description: How is the status data accessed? Include CLI commands (e.g. `--format json`), REST endpoints, or documentation links.
+    validations:
+      required: true
+  - type: textarea
+    id: sample_data
+    attributes:
+      label: Sample output or payload (sanitized)
+      description: "Provide sample JSON/YAML output or schema if available. ⚠️ Remove private IP addresses, passwords, or company hostnames before posting!"
+  - type: checkboxes
+    id: contribution
+    attributes:
+      label: Contribution
+      options:
+        - label: I regularly use this tool and can test or provide sample topologies
+        - label: I am interested in contributing code or submitting a pull request

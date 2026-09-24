@@ -1,0 +1,105 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  # The .plasmoid release goes out on its own, so a broken desktop build cannot
+  # hold it back; the Windows / macOS files are attached once they have passed.
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Build .plasmoid
+        run: make pack
+
+      - name: Get version and artifact path
+        id: info
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          NAME="$(basename "$PWD")"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "artifact=${NAME}-${VERSION}.plasmoid" >> "$GITHUB_OUTPUT"
+
+      # The tag must match the version inside the package (tag.sh keeps them in step).
+      - name: Version matches metadata.json
+        env:
+          VERSION: ${{ steps.info.outputs.version }}
+        run: test "$(jq -r .KPlugin.Version package/metadata.json)" = "$VERSION"
+
+      - name: Generate release notes
+        id: notes
+        run: |
+          PREV_TAG="$(git tag --sort=-creatordate | grep -E '^v' | sed -n '2p')"
+          if [ -n "$PREV_TAG" ]; then
+            NOTES="$(git log "${PREV_TAG}..HEAD" --pretty=format:'- %s' --no-merges)"
+          else
+            NOTES="$(git log --pretty=format:'- %s' --no-merges)"
+          fi
+          {
+            echo "notes<<EOF"
+            echo "$NOTES"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ steps.info.outputs.version }}
+          prerelease: ${{ contains(steps.info.outputs.version, '-') }}
+          body: |
+            ## Changes
+            ${{ steps.notes.outputs.notes }}
+
+            ---
+            **KDE Plasma:** download the `.plasmoid` and run
+            ```
+            kpackagetool6 -t Plasma/Applet -i ${{ steps.info.outputs.artifact }}
+            ```
+            then add *CLAB Widget* to your desktop, a panel, or the system tray. NixOS: use the flake's `nixosModules.default`.
+
+            **Hyprland / Quickshell:** `nix run github:Muddyblack/clab-widget#view-hyprland`, or clone and run `qs -p .`.
+
+            **Windows:** run `CLAB-Widget-Setup-${{ steps.info.outputs.version }}.exe` (no admin rights), or unzip `clab-widget-windows-${{ steps.info.outputs.version }}.zip` and run `CLAB Widget.exe`. It lives in the tray; add your lab server under *remote hosts*.
+
+            **macOS:** open `clab-widget-macos-${{ steps.info.outputs.version }}.dmg` and drag *CLAB Widget* to Applications. It lives in the menu bar. Ad-hoc signed, not notarized: if macOS blocks it, use System Settings → Privacy & Security → Open Anyway.
+
+            The Windows and macOS files are attached a few minutes after the release appears, once their builds have passed.
+          files: |
+            ${{ steps.info.outputs.artifact }}
+
+  desktop:
+    uses: ./.github/workflows/desktop.yml
+    with:
+      version: ${{ github.ref_name }}
+
+  desktop-assets:
+    needs: [release, desktop]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: clab-widget-*
+          merge-multiple: true
+
+      - name: Attach the Windows and macOS builds to the release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            clab-widget-windows-*.zip
+            CLAB-Widget-Setup-*.exe
+            clab-widget-macos-*.zip
+            clab-widget-macos-*.dmg
