@@ -528,7 +528,8 @@ def host_argv(conn, script, interactive=False):
 def own_source():
     """This script as sent to a host, with the upstream data inlined."""
     with open(os.path.abspath(__file__), "rb") as f:
-        src = f.read()
+        # A Windows checkout may have CRLF; the host wants LF either way.
+        src = f.read().replace(b"\r\n", b"\n")
     inline = json.dumps({name: upstream(name) for name in UPSTREAM_FILES}, separators=(",", ":"))
     return src.replace(b"\nUPSTREAM_INLINE = {}\n", ("\nUPSTREAM_INLINE = " + inline + "\n").encode(), 1)
 

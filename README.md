@@ -7,11 +7,10 @@
 <h1 align="center">CLAB Widget</h1>
 
 <p align="center">
-  <a href="https://github.com/Muddyblack/clab-widget/releases">
-    <img src="https://img.shields.io/badge/Download-Releases-1d99f3?style=for-the-badge&logo=github&logoColor=white" alt="Download" />
-  </a>
+  <!-- <a href="https://github.com/Muddyblack/clab-widget/releases"> -->
+    <!-- <img src="https://img.shields.io/badge/Download-Releases-1d99f3?style=for-the-badge&logo=github&logoColor=white" alt="Download" /> -->
+  <!-- </a> -->
   <img src="https://img.shields.io/badge/KDE_Plasma-6-1d99f3?style=for-the-badge&logo=kde&logoColor=white" alt="KDE Plasma 6" />
-  <img src="https://img.shields.io/badge/Hyprland-Quickshell-58e1ff?style=for-the-badge" alt="Hyprland / Quickshell" />
   <img src="https://img.shields.io/badge/Windows_·_macOS_·_GNOME-tray_app-4aa8ff?style=for-the-badge" alt="Windows, macOS, GNOME tray app" />
   <br/>
   <a href="LICENSE">
