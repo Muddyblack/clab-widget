@@ -39,8 +39,6 @@ replacing them.
 
 ## Screenshots
 
-▶ [16-second showcase video](docs/readme/showcase.mp4) (`make video`)
-
 | Topology map | 102-node fabric |
 | :---: | :---: |
 | <img src="docs/readme/map.png" width="400" alt="Topology map of a leaf-spine lab with clab-ui role icons; links to the down leaf dashed red"> | <img src="docs/readme/map-large.png" width="400" alt="A 102-node data-centre fabric laid out by tiers"> |
