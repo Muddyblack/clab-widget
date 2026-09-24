@@ -271,8 +271,44 @@ var ROLE_TIER = {
     "rgw": 2,
     "server": 3,
     "client": 3,
-    "ue": 3
+    "ue": 3,
+    "external": 4
 };
+
+// The map's nodes and links: the lab's own, plus one small endpoint per link
+// end outside the lab (host:<if>, macvlan, mgmt-net), so those links show too.
+function mapGraph(lab) {
+    var nodes = lab.nodes || [], links = lab.links || [];
+    var known = {}, seen = {}, ext = [], out = [], i;
+    for (i = 0; i < nodes.length; i++)
+        known[nodes[i].name] = true;
+    function end(name, iface) {
+        if (!name || known[name])
+            return name;
+        var key = name + ":" + (iface || "");
+        if (!seen[key]) {
+            seen[key] = true;
+            ext.push({
+                name: key,
+                label: iface || name,
+                kind: name,
+                role: "external",
+                external: true,
+                running: true
+            });
+        }
+        return key;
+    }
+    for (i = 0; i < links.length; i++)
+        out.push(Object.assign({}, links[i], {
+            a: end(links[i].a, links[i].aIf),
+            z: end(links[i].z, links[i].zIf)
+        }));
+    return {
+        nodes: ext.length ? nodes.concat(ext) : nodes,
+        links: out
+    };
+}
 
 function layoutNodes(nodes, w, h, pad) {
     var out = {};

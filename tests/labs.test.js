@@ -7,7 +7,7 @@ const assert = require("assert");
 
 // Labs.js is a QML JS library; drop the pragma and expose its functions.
 const src = fs.readFileSync(path.join(__dirname, "../package/contents/code/Labs.js"), "utf8").replace(/^\.pragma library$/m, "");
-const Labs = new Function(src + "; return { q, parse, summaryText, badgeText, lifecycleText, memoryText, bytes, newTracker, trackEvents, duration, layoutNodes, mapLayout, togglePin, pinnedSegments, segmentText, pinnedFirst, nameFromId, rowsFor, syncModel, visibleLabs, shownSnapshot, sourceArgs, openArgs, shellArgs, fileUrl };")();
+const Labs = new Function(src + "; return { q, parse, summaryText, badgeText, lifecycleText, memoryText, bytes, newTracker, trackEvents, duration, layoutNodes, mapLayout, mapGraph, togglePin, pinnedSegments, segmentText, pinnedFirst, nameFromId, rowsFor, syncModel, visibleLabs, shownSnapshot, sourceArgs, openArgs, shellArgs, fileUrl };")();
 
 let failed = 0;
 function test(name, fn) {
@@ -202,6 +202,30 @@ test("small lab keeps labels and full-size icons", () => {
     assert.strictEqual(m.labels, true);
     assert.strictEqual(m.size, 26);
     assert.strictEqual(m.height, 140);
+});
+
+test("mapGraph: ends outside the lab become endpoints, links keep state", () => {
+    const lab = {
+        nodes: [{name: "srv1", running: true}, {name: "srv2", running: true}],
+        links: [
+            {a: "srv1", aIf: "eth1", z: "srv2", zIf: "eth1", up: false},
+            {a: "srv1", aIf: "eth2", z: "host", zIf: "veth-srv1", up: true},
+            {a: "srv2", aIf: "eth2", z: "macvlan", zIf: "enp3s0"},
+            {a: "srv2", aIf: "eth3", z: "macvlan", zIf: "enp3s0"}
+        ]
+    };
+    const g = Labs.mapGraph(lab);
+    assert.deepStrictEqual(g.nodes.map(n => n.name), ["srv1", "srv2", "host:veth-srv1", "macvlan:enp3s0"]);
+    const ext = g.nodes[2];
+    assert.strictEqual(ext.external, true);
+    assert.strictEqual(ext.label, "veth-srv1");
+    assert.strictEqual(ext.kind, "host");
+    assert.deepStrictEqual(g.links.map(l => [l.a, l.z, l.up]), [["srv1", "srv2", false], ["srv1", "host:veth-srv1", true], ["srv2", "macvlan:enp3s0", undefined], ["srv2", "macvlan:enp3s0", undefined]]);
+    assert.strictEqual(lab.links[1].z, "host"); // snapshot untouched
+    assert.strictEqual(Labs.mapGraph({nodes: lab.nodes, links: []}).nodes, lab.nodes);
+    // endpoints sit on the bottom tier, below servers
+    const m = Labs.mapLayout([{name: "sp", role: "spine"}, {name: "s", role: "server"}, ext], 480);
+    assert.ok(m.pos["host:veth-srv1"].y > m.pos.s.y);
 });
 
 test("40 same-role nodes become a grid, not a circle", () => {

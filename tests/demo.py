@@ -66,20 +66,50 @@ def main(root, large=False, huge=False):
     roles.update({"srv1": "server", "srv2": "server"})
     links = [(s, lf) for s in ("spine1", "spine2") for lf in ("leaf1", "leaf2", "leaf3")]
     links += [("leaf1", "srv1"), ("leaf3", "srv2")]
+    # Ends outside the lab: a host veth and a macvlan on the host's NIC.
+    links += [("srv1", "host:srv1-eth2"), ("srv2", "macvlan:enp3s0")]
 
     def topo_data(nodes, pairs):
-        return {
-            "nodes": {n: {"labels": {"graph-icon": r} if r else {}} for n, r in nodes.items()},
-            "links": [
-                {"endpoints": {"a": {"node": a, "interface": "e1-1"}, "z": {"node": z, "interface": "e1-2"}}}
-                for a, z in pairs
-            ],
-        }
+        """Each end gets the node's next e1-N (or the given host-side name)."""
+        used, out = {}, []
+        for a, z in pairs:
+            eps = {}
+            for side, end in (("a", a), ("z", z)):
+                node, _, iface = end.partition(":")
+                if not iface:
+                    used[node] = used.get(node, 0) + 1
+                    iface = f"e1-{used[node]}"
+                eps[side] = {"node": node, "interface": iface}
+            out.append({"endpoints": eps})
+        return {"nodes": {n: {"labels": {"graph-icon": r} if r else {}} for n, r in nodes.items()}, "links": out}
 
+    def ifaces(lab, data, down=()):
+        """Saved operstates per container (what `docker exec` would read):
+        every link end up except those in `down` (node, iface)."""
+        out = {}
+        for link in data["links"]:
+            for ep in link["endpoints"].values():
+                if ep["node"] in ("host", "macvlan"):
+                    continue
+                state = "down" if (ep["node"], ep["interface"]) in down else "up"
+                out.setdefault(f"clab-{lab}-{ep['node']}", {})[ep["interface"]] = state
+        return out
+
+    fab_data = topo_data(roles, links)
+    ospf_data = topo_data({"r1": "", "r2": "", "r3": ""}, [("r1", "r2"), ("r2", "r3"), ("r3", "r1")])
     with open(os.path.join(fab, "clab-fabric", "topology-data.json"), "w") as f:
-        json.dump(topo_data(roles, links), f)
+        json.dump(fab_data, f)
     with open(os.path.join(nl, "clab-ospf", "topology-data.json"), "w") as f:
-        json.dump(topo_data({"r1": "", "r2": "", "r3": ""}, [("r1", "r2"), ("r2", "r3"), ("r3", "r1")]), f)
+        json.dump(ospf_data, f)
+    # spine2 ↔ leaf3 is down (interface shut on spine2), the rest up.
+    down_end = next(
+        (ep["node"], ep["interface"])
+        for link in fab_data["links"]
+        for ep in link["endpoints"].values()
+        if {e["node"] for e in link["endpoints"].values()} == {"spine2", "leaf3"} and ep["node"] == "spine2"
+    )
+    with open(os.path.join(root, "ifaces.json"), "w") as f:
+        json.dump({**ifaces("fabric", fab_data, [down_end]), **ifaces("ospf", ospf_data)}, f)
 
     def c(lab, path, node, kind, ip, state="running", status="Up 3 hours"):
         return {
@@ -120,7 +150,10 @@ def main(root, large=False, huge=False):
     with open(os.path.join(root, "netlab.json"), "w") as f:
         json.dump(netlab, f)
 
-    print(f"export CLAB_WIDGET_CLAB_JSON={root}/clab.json CLAB_WIDGET_NETLAB_JSON={root}/netlab.json")
+    print(
+        f"export CLAB_WIDGET_CLAB_JSON={root}/clab.json CLAB_WIDGET_NETLAB_JSON={root}/netlab.json"
+        f" CLAB_WIDGET_IFACES_JSON={root}/ifaces.json"
+    )
 
 
 if __name__ == "__main__":

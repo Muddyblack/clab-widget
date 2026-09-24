@@ -16,23 +16,25 @@ Item {
     property Item menuAnchor
     signal nodeMenu(var node, real x, real y)
 
+    // Lab nodes + endpoints outside the lab (host / macvlan / mgmt-net).
+    readonly property var graph: Labs.mapGraph(lab)
     readonly property int dense: 150
-    readonly property bool isDense: lab.nodes.length > dense
+    readonly property bool isDense: graph.nodes.length > dense
     // Layout width chosen so the laid-out map has about the viewport's shape:
     // n nodes at ~30 px spacing and ~26 px row gap, so "fit" shows a readable
     // block instead of a tall thin column. Small labs just use the view width.
     readonly property real logicalW: {
-        var n = lab.nodes.length;
+        var n = graph.nodes.length;
         if (width <= 0 || height <= 0)
             return 200;
         var perRow = Math.sqrt(n * (width / height) * (26 / 30));
         return Math.max(width, perRow * 30 + 44);
     }
-    readonly property var geo: Labs.mapLayout(lab.nodes, logicalW, Infinity)
+    readonly property var geo: Labs.mapLayout(graph.nodes, logicalW, Infinity)
     readonly property var byName: {
         var m = {};
-        for (var i = 0; i < lab.nodes.length; i++)
-            m[lab.nodes[i].name] = lab.nodes[i];
+        for (var i = 0; i < graph.nodes.length; i++)
+            m[graph.nodes[i].name] = graph.nodes[i];
         return m;
     }
     readonly property real maxZoom: Math.max(1, Math.min(4, 4096 / Math.max(logicalW, geo.height)))
@@ -133,36 +135,41 @@ Item {
                     onPaint: {
                         var ctx = getContext("2d");
                         ctx.reset();
-                        var z = view.zoom, pos = view.geo.pos, ls = view.lab.links || [];
+                        var z = view.zoom, pos = view.geo.pos, ls = view.graph.links;
                         var many = ls.length > 60;
                         ctx.lineWidth = many ? Math.max(0.5, 0.8 * Math.min(z, 2)) : 1.5;
                         ctx.strokeStyle = view.theme.sub;
                         ctx.globalAlpha = many ? 0.16 : 0.5;
-                        ctx.beginPath();
-                        var broken = [];
+                        // Like clab-ui: link state known (backend, --details)
+                        // → green up / red down; unknown → neutral grey.
+                        var plain = [], up = [], broken = [];
                         for (var i = 0; i < ls.length; i++) {
                             var a = pos[ls[i].a], b = pos[ls[i].z];
                             if (!a || !b)
                                 continue;
                             var na = view.byName[ls[i].a], nb = view.byName[ls[i].z];
-                            if (!(na && na.running && nb && nb.running)) {
+                            if (!(na && na.running && nb && nb.running) || ls[i].up === false)
                                 broken.push([a, b]);
-                                continue;
-                            }
-                            ctx.moveTo(a.x * z, a.y * z);
-                            ctx.lineTo(b.x * z, b.y * z);
+                            else
+                                (ls[i].up === true ? up : plain).push([a, b]);
                         }
-                        ctx.stroke();
-                        // Links touching a down node: dashed red, on top.
+                        function stroke(segs) {
+                            ctx.beginPath();
+                            for (var k = 0; k < segs.length; k++) {
+                                ctx.moveTo(segs[k][0].x * z, segs[k][0].y * z);
+                                ctx.lineTo(segs[k][1].x * z, segs[k][1].y * z);
+                            }
+                            ctx.stroke();
+                        }
+                        stroke(plain);
+                        ctx.strokeStyle = view.theme.ok;
+                        ctx.globalAlpha = many ? 0.3 : 0.7;
+                        stroke(up);
+                        // Down links (or touching a down node): dashed red, on top.
                         ctx.globalAlpha = 0.85;
                         ctx.strokeStyle = view.theme.bad;
                         ctx.setLineDash([4, 3]);
-                        ctx.beginPath();
-                        for (i = 0; i < broken.length; i++) {
-                            ctx.moveTo(broken[i][0].x * z, broken[i][0].y * z);
-                            ctx.lineTo(broken[i][1].x * z, broken[i][1].y * z);
-                        }
-                        ctx.stroke();
+                        stroke(broken);
                         ctx.setLineDash([]);
                         if (!view.isDense)
                             return;
@@ -172,11 +179,11 @@ Item {
                         ctx.font = Math.max(9, view.theme.smallSize - 1) + "px sans-serif";
                         ctx.textAlign = "center";
                         var labelled = [];
-                        for (var n = 0; n < view.lab.nodes.length; n++) {
-                            var node = view.lab.nodes[n], p = pos[node.name];
+                        for (var n = 0; n < view.graph.nodes.length; n++) {
+                            var node = view.graph.nodes[n], p = pos[node.name];
                             if (!p)
                                 continue;
-                            ctx.fillStyle = node.running ? (view.tierShade[node.role] || "#005aff") : Qt.rgba(0.97, 0.44, 0.44, 0.9);
+                            ctx.fillStyle = node.external ? view.theme.sub : node.running ? (view.tierShade[node.role] || "#005aff") : Qt.rgba(0.97, 0.44, 0.44, 0.9);
                             ctx.fillRect(p.x * z - s / 2, p.y * z - s / 2, s, s);
                             if (view.showLabels || !node.running)
                                 labelled.push(node);
@@ -188,9 +195,9 @@ Item {
                         ctx.strokeStyle = "rgba(10, 14, 24, 0.85)";
                         for (n = 0; n < labelled.length; n++) {
                             var ln = labelled[n], lp = pos[ln.name];
-                            ctx.strokeText(ln.name, lp.x * z, lp.y * z + s / 2 + 11);
+                            ctx.strokeText(ln.label || ln.name, lp.x * z, lp.y * z + s / 2 + 11);
                             ctx.fillStyle = ln.running ? view.theme.sub : view.theme.bad;
-                            ctx.fillText(ln.name, lp.x * z, lp.y * z + s / 2 + 11);
+                            ctx.fillText(ln.label || ln.name, lp.x * z, lp.y * z + s / 2 + 11);
                         }
                     }
                 }
@@ -204,7 +211,7 @@ Item {
                         ctx.reset();
                         if (view.hovered === "")
                             return;
-                        var z = view.zoom, pos = view.geo.pos, ls = view.lab.links || [], h = view.hovered;
+                        var z = view.zoom, pos = view.geo.pos, ls = view.graph.links, h = view.hovered;
                         ctx.strokeStyle = view.theme.text;
                         ctx.globalAlpha = 0.9;
                         ctx.lineWidth = 1.6;
@@ -224,7 +231,7 @@ Item {
 
                 // Sparse labs: real clab-ui icons as items.
                 Repeater {
-                    model: view.isDense ? [] : view.lab.nodes
+                    model: view.isDense ? [] : view.graph.nodes
 
                     Item {
                         readonly property var p: view.geo.pos[modelData.name] || ({
@@ -236,9 +243,21 @@ Item {
                         width: view.nodeSize
                         height: view.nodeSize
 
+                        // Endpoint outside the lab (host / macvlan / mgmt-net): a small ring.
+                        Rectangle {
+                            visible: modelData.external === true
+                            anchors.centerIn: parent
+                            width: parent.width * 0.55
+                            height: width
+                            radius: width / 2
+                            color: view.theme.cardSolid
+                            border.width: 1.5
+                            border.color: view.theme.sub
+                        }
                         Image {
+                            visible: modelData.external !== true
                             anchors.fill: parent
-                            source: Labs.fileUrl(modelData.icon)
+                            source: modelData.external ? "" : Labs.fileUrl(modelData.icon)
                             sourceSize: Qt.size(64, 64)
                             asynchronous: true
                             opacity: modelData.running ? 1 : 0.4
@@ -258,7 +277,7 @@ Item {
                             anchors.top: parent.bottom
                             anchors.topMargin: 1
                             anchors.horizontalCenter: parent.horizontalCenter
-                            text: modelData.name
+                            text: modelData.label || modelData.name
                             color: modelData.running ? view.theme.sub : view.theme.bad
                             font.pixelSize: view.theme.smallSize - 1
                         }
@@ -283,7 +302,7 @@ Item {
                         anchors.centerIn: parent
                         text: {
                             var n = view.byName[view.hovered];
-                            return n ? n.name + "  ·  " + n.kind + (n.ipv4 ? "  ·  " + n.ipv4 : "") : "";
+                            return n ? (n.label || n.name) + "  ·  " + n.kind + (n.ipv4 ? "  ·  " + n.ipv4 : "") : "";
                         }
                         color: view.theme.text
                         font.pixelSize: view.theme.smallSize
@@ -301,7 +320,7 @@ Item {
                 acceptedButtons: Qt.LeftButton | Qt.RightButton
                 onTapped: (ev, button) => {
                     var name = view.nodeAt(ev.position.x - stage.x, ev.position.y - stage.y);
-                    if (name === "")
+                    if (name === "" || view.byName[name].external)
                         return;
                     var g = content.mapToItem(view.menuAnchor, ev.position.x, ev.position.y);
                     view.nodeMenu(view.byName[name], g.x, g.y);

@@ -9,7 +9,8 @@ FORM ?= planar
 
 run: ## preview the widget with the demo labs, no Docker needed (FORM=horizontal for a panel)
 	@python3 tests/demo.py $(DEMO_DIR) --large >/dev/null
-	@export CLAB_WIDGET_CLAB_JSON=$(DEMO_DIR)/clab.json CLAB_WIDGET_NETLAB_JSON=$(DEMO_DIR)/netlab.json; \
+	@export CLAB_WIDGET_CLAB_JSON=$(DEMO_DIR)/clab.json CLAB_WIDGET_NETLAB_JSON=$(DEMO_DIR)/netlab.json \
+	  CLAB_WIDGET_IFACES_JSON=$(DEMO_DIR)/ifaces.json; \
 	if command -v nix >/dev/null 2>&1 && [ -f flake.nix ]; then \
 	  nix run .#view -- $(FORM); \
 	else \

@@ -28,8 +28,9 @@
 Sources are `containerlab inspect --all --format json` and
 `netlab status --all --format json`; the --*-json flags (or the
 $CLAB_WIDGET_CLAB_JSON / $CLAB_WIDGET_NETLAB_JSON env vars) feed saved output
-instead, for tests and demos. Every frontend renders the snapshot as-is, so all
-merging and status decisions happen here, not in QML.
+instead, for tests and demos ($CLAB_WIDGET_IFACES_JSON: saved link states).
+Every frontend renders the snapshot as-is, so all merging and status
+decisions happen here, not in QML.
 
 A netlab lab deployed through containerlab shows up in both tools. netlab writes
 clab.yml into its instance directory, so a containerlab lab whose topology file
@@ -1189,6 +1190,81 @@ def docker_memory():
     return parse_docker_stats(proc.stdout) if proc.returncode == 0 else {}
 
 
+# Link state, as clab-ui colours it: each node's interfaces' operstate, read
+# inside the container (`containerlab inspect interfaces` needs root; this only
+# needs the docker group). A link is up when every node end is up.
+
+LINK_UP_STATES = {"up", "unknown"}  # "unknown": tun/dummy-style ifaces that are up
+LINK_STATE_MAX_NODES = 200
+IFACE_SCRIPT = 'for i in /sys/class/net/*; do printf "%s %s\\n" "${i##*/}" "$(cat "$i/operstate" 2>/dev/null)"; done'
+
+
+def parse_operstates(text):
+    """`name operstate` lines → {iface: operstate}."""
+    out = {}
+    for line in (text or "").splitlines():
+        parts = line.split()
+        if len(parts) == 2:
+            out[parts[0]] = parts[1]
+    return out
+
+
+def docker_ifaces(container):
+    """{iface: operstate} inside a container, or None if it can't be read
+    (no sh in the image, docker unreachable)."""
+    try:
+        proc = subprocess.run(
+            ["docker", "exec", container, "sh", "-c", IFACE_SCRIPT],
+            capture_output=True,
+            text=True,
+            timeout=3,
+            stdin=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return parse_operstates(proc.stdout) if proc.returncode == 0 else None
+
+
+def add_link_state(labs, fetch_ifaces):
+    """Set link["up"] on containerlab links whose node ends could all be read.
+    Ends outside the lab (host, macvlan, mgmt-net) don't count; a stopped
+    node's end is down."""
+    wanted = {}
+    for lab in labs:
+        if lab["managedBy"] != "containerlab" and "containerlab" not in lab.get("providers", []):
+            continue
+        if not lab.get("links"):
+            continue
+        for n in lab["nodes"]:
+            if n.get("running") and n.get("container"):
+                wanted[n["container"]] = None
+    if not wanted or len(wanted) > LINK_STATE_MAX_NODES:
+        return
+    from concurrent.futures import ThreadPoolExecutor
+
+    with ThreadPoolExecutor(max_workers=min(8, len(wanted))) as pool:
+        for container, states in zip(wanted, pool.map(fetch_ifaces, wanted), strict=True):
+            wanted[container] = states
+    for lab in labs:
+        nodes = {n["name"]: n for n in lab["nodes"]}
+        for link in lab.get("links") or []:
+            ends = []
+            for name, iface in ((link["a"], link.get("aIf", "")), (link["z"], link.get("zIf", ""))):
+                node = nodes.get(name)
+                if node is None:
+                    continue
+                if not node.get("running"):
+                    ends.append(False)
+                    continue
+                states = wanted.get(node.get("container"))
+                if states is None or iface not in states:
+                    ends.append(None)
+                else:
+                    ends.append(states[iface] in LINK_UP_STATES)
+            if ends and None not in ends:
+                link["up"] = all(ends)
+
+
 def netlab_node_running(status):
     status = (status or "").lower()
     return status == "running" or status.startswith("up")
@@ -1220,9 +1296,11 @@ def netlab_nodes(detail):
     return nodes
 
 
-def add_details(labs, fetch_memory, fetch_netlab):
-    """Fill in memory and non-clab netlab nodes. The fetchers are injected so
-    tests can feed saved output."""
+def add_details(labs, fetch_memory, fetch_netlab, fetch_ifaces=None):
+    """Fill in memory, non-clab netlab nodes and link state. The fetchers are
+    injected so tests can feed saved output."""
+    if fetch_ifaces is not None:
+        add_link_state(labs, fetch_ifaces)
     for lab in labs:
         if lab["managedBy"] == "netlab" and not lab["nodesKnown"] and lab.get("instance"):
             detail = fetch_netlab(lab["instance"])
@@ -1335,8 +1413,7 @@ def natural_key(name):
 
 
 def finish(lab):
-    enrich_topology(lab)
-    default_icons(lab)
+    default_icons(lab)  # also for nodes the details pass added
     lab["nodes"].sort(key=lambda n: natural_key(n["name"]))
     lab["running"] = sum(1 for n in lab["nodes"] if n["running"])
     lab["total"] = len(lab["nodes"])
@@ -1436,6 +1513,9 @@ def build_snapshot(clab_data, clab_error, netlab_data, netlab_error, enabled, de
         sources[f"remote:{name}"] = source_state(rerr)
         labs.extend(rlabs)
 
+    # Topology first: the details pass colours its links.
+    for lab in labs:
+        enrich_topology(lab)
     if details is not None:
         details([lab for lab in labs if not lab.get("remote")])
 
@@ -1489,10 +1569,13 @@ def take_snapshot(args):
     details = None
     if "--details" in args:
         if clab_file or netlab_file:
-            # Saved output: no live docker/netlab to ask, only what the files hold.
-            details = lambda labs: add_details(labs, dict, lambda _i: None)  # noqa: E731
+            # Saved output: no live docker/netlab to ask, only what the files hold
+            # (+ saved interface states, $CLAB_WIDGET_IFACES_JSON, for the demo).
+            saved_ifaces, _err = read_json_file(os.environ.get("CLAB_WIDGET_IFACES_JSON", ""))
+            fetch_ifaces = saved_ifaces.get if isinstance(saved_ifaces, dict) else None
+            details = lambda labs: add_details(labs, dict, lambda _i: None, fetch_ifaces)  # noqa: E731
         else:
-            details = lambda labs: add_details(labs, docker_memory, fetch_netlab_detail)  # noqa: E731
+            details = lambda labs: add_details(labs, docker_memory, fetch_netlab_detail, docker_ifaces)  # noqa: E731
 
     remotes = []
     if "--no-remote" not in args and not (clab_file or netlab_file):

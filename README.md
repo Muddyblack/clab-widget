@@ -58,7 +58,10 @@ The screenshots are rendered from the demo labs: `make screenshots`.
   `topology-data.json` links, `graph-icon` roles, clab-ui's
   `.annotations.json` (icon, colour, position), and legacy
   `graph-posX/posY` labels. It uses clab-ui's own role icons. Pan, zoom,
-  pinch and fit. Hover a node to highlight its links. Labs of 150+ nodes are
+  pinch and fit. Hover a node to highlight its links. Links are coloured
+  like clab-ui while the popup is open: green up, dashed red down (read from
+  each node's interfaces, no root needed); host / macvlan / mgmt-net ends
+  show as small endpoints. Labs of 150+ nodes are
   drawn as tiles, so a 700-node fabric stays smooth.
 - **One click back**: ssh (per-kind user) or `netlab connect`, docker shell
   (`sr_cli`…), logs, open in the containerlab app / netlab-ui / VS Code, like

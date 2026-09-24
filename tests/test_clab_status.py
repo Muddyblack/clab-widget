@@ -270,6 +270,70 @@ class Details(unittest.TestCase):
         self.assertNotIn("memoryBytes", snap["labs"][0])
 
 
+class LinkState(unittest.TestCase):
+    """--details: link up/down from each node's interface operstate."""
+
+    def lab(self, links, stopped=()):
+        nodes = [{"name": n, "container": f"clab-x-{n}", "running": n not in stopped} for n in ("a", "b", "c", "d")]
+        return {"managedBy": "containerlab", "providers": ["containerlab"], "nodes": nodes, "links": links}
+
+    def test_parse_operstates(self):
+        self.assertEqual(cs.parse_operstates("lo unknown\neth1 up\nbroken\n"), {"lo": "unknown", "eth1": "up"})
+
+    def test_up_down_and_unknown(self):
+        states = {
+            "clab-x-a": {"eth1": "up", "eth2": "up", "eth3": "up"},
+            "clab-x-b": {"eth1": "up", "eth2": "lowerlayerdown"},
+            "clab-x-c": None,  # no sh in the image
+        }
+        links = [
+            {"a": "a", "aIf": "eth1", "z": "b", "zIf": "eth1"},  # both up
+            {"a": "a", "aIf": "eth2", "z": "b", "zIf": "eth2"},  # peer shut
+            {"a": "a", "aIf": "eth3", "z": "c", "zIf": "eth1"},  # c unreadable
+            {"a": "b", "aIf": "eth1", "z": "d", "zIf": "eth1"},  # d stopped
+            {"a": "a", "aIf": "eth3", "z": "host", "zIf": "veth-a"},  # outside end ignored
+            {"a": "a", "aIf": "eth9", "z": "macvlan", "zIf": "enp3s0"},  # iface not found
+        ]
+        lab = self.lab(links, stopped=("d",))
+        asked = []
+        cs.add_link_state([lab], lambda c: asked.append(c) or states.get(c))
+        self.assertEqual([link.get("up") for link in links], [True, False, None, False, True, None])
+        self.assertNotIn("clab-x-d", asked)  # stopped nodes aren't exec'd into
+
+    def test_netlab_on_vm_and_linkless_labs_skipped(self):
+        r1 = {"name": "r1", "container": "r1", "running": True}
+        vm = {"managedBy": "netlab", "providers": ["libvirt"], "nodes": [r1]}
+        vm["links"] = [{"a": "r1", "aIf": "eth1", "z": "r2", "zIf": "eth1"}]
+        bare = self.lab([])
+        cs.add_link_state([vm, bare], lambda c: self.fail("asked " + c))
+
+    def test_demo_snapshot(self):
+        with tempfile.TemporaryDirectory() as d:
+            import subprocess
+            import sys
+
+            subprocess.run([sys.executable, os.path.join(HERE, "demo.py"), d], check=True, capture_output=True)
+            env = dict(
+                os.environ,
+                CLAB_WIDGET_CLAB_JSON=os.path.join(d, "clab.json"),
+                CLAB_WIDGET_NETLAB_JSON=os.path.join(d, "netlab.json"),
+                CLAB_WIDGET_IFACES_JSON=os.path.join(d, "ifaces.json"),
+            )
+            out = subprocess.run(
+                [sys.executable, SCRIPT, "snapshot", "--details", "--no-remote"],
+                env=env,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        (fab,) = [lab for lab in json.loads(out.stdout)["labs"] if lab["name"] == "fabric"]
+        up = {(link["a"], link["z"]): link.get("up") for link in fab["links"]}
+        self.assertIs(up[("spine1", "leaf1")], True)
+        self.assertIs(up[("spine2", "leaf3")], False)  # shut
+        self.assertIs(up[("spine1", "leaf2")], False)  # leaf2 exited
+        self.assertIs(up[("srv2", "macvlan")], True)
+
+
 class Uptime(unittest.TestCase):
     def test_docker_status(self):
         cases = {

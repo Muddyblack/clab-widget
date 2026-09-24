@@ -60,7 +60,8 @@
             "required": ["a", "z"],
             "properties": {
               "a": { "type": "string" }, "aIf": { "type": "string" },
-              "z": { "type": "string" }, "zIf": { "type": "string" }
+              "z": { "type": "string" }, "zIf": { "type": "string" },
+              "up": { "type": "boolean", "description": "--details, containerlab only: every node end's interface is up. Absent = not known. An end naming no lab node (host, macvlan, mgmt-net) is outside the lab and doesn't count." }
             }
           }
         },
