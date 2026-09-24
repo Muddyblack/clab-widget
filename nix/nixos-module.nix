@@ -1,11 +1,20 @@
-# NixOS module: CLAB Widget plus a containerlab/netlab setup that works for a
-# normal user, the way containerlab's own installer does it — a setuid-root
-# `containerlab` owned by group clab_admins (netlab refuses to run otherwise:
-# it checks the group and calls `containerlab deploy` without sudo). Store
-# paths can't be setuid, hence security.wrappers.
+# NixOS module: CLAB Widget, using the containerlab / netlab you already have.
 #
 #   imports = [ clab-widget.nixosModules.default ];
 #   programs.clab-widget = { enable = true; users = [ "me" ]; };
+#
+# That installs only the widget. The backend finds containerlab and netlab
+# wherever they are (PATH, /run/wrappers/bin, your Nix profiles, ~/.local/bin).
+# No containerlab / netlab yet? Let the module install them:
+#
+#   programs.clab-widget.containerlab.enable = true;  # setuid, for clab_admins
+#   programs.clab-widget.netlab.enable = true;
+#
+# containerlab is set up the way its own installer does it: a setuid-root
+# binary owned by group clab_admins (netlab refuses to run otherwise: it checks
+# the group and calls `containerlab deploy` without sudo). Store paths can't be
+# setuid, hence security.wrappers. If you already define
+# security.wrappers.containerlab yourself, leave containerlab.enable off.
 self:
 { config, lib, pkgs, ... }:
 
@@ -15,20 +24,27 @@ let
 in
 {
   options.programs.clab-widget = {
-    enable = lib.mkEnableOption "CLAB Widget (Plasma widget) with containerlab and netlab";
+    enable = lib.mkEnableOption "CLAB Widget (Plasma widget); uses the containerlab / netlab already installed";
 
     users = lib.mkOption {
       type = lib.types.listOf lib.types.str;
       default = [ ];
       example = [ "alice" ];
-      description = "Users allowed to run containerlab (members of clab_admins). They also need Docker access.";
+      description = ''
+        Users added to clab_admins, the group a setuid containerlab (this
+        module's or your own) lets run labs without sudo. They also need Docker
+        access.
+      '';
     };
 
     containerlab = {
       enable = lib.mkOption {
         type = lib.types.bool;
-        default = true;
-        description = "Install containerlab as a setuid wrapper restricted to clab_admins.";
+        default = false;
+        description = ''
+          Also install containerlab, as a setuid wrapper restricted to
+          clab_admins. Leave off when containerlab is installed already.
+        '';
       };
       package = lib.mkOption {
         type = lib.types.package;
@@ -40,8 +56,8 @@ in
 
     netlab.enable = lib.mkOption {
       type = lib.types.bool;
-      default = true;
-      description = "Install netlab (with Ansible) system-wide.";
+      default = false;
+      description = "Also install netlab (with Ansible) system-wide. Leave off when netlab is installed already.";
     };
   };
 
@@ -50,8 +66,12 @@ in
       environment.systemPackages = [ own.default ] ++ lib.optional cfg.netlab.enable own.netlab;
     }
 
-    (lib.mkIf cfg.containerlab.enable {
+    (lib.mkIf (cfg.users != [ ]) {
       users.groups.clab_admins.members = cfg.users;
+    })
+
+    (lib.mkIf cfg.containerlab.enable {
+      users.groups.clab_admins = { };
 
       # Same as the upstream installer: root:clab_admins, setuid, no access
       # for others (chmod 4750).

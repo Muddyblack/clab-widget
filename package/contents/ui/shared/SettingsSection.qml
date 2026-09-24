@@ -11,6 +11,21 @@ ColumnLayout {
     property string icon
     default property alias rows: body.data
 
+    Component.onCompleted: {
+        for (var i = 0; i < body.children.length; i++)
+            if (body.children[i].context !== undefined)
+                body.children[i].context = section.title;
+    }
+    // A search hit in any of its rows (SettingRow.shown && matches).
+    readonly property bool hasMatch: {
+        for (var i = 0; i < body.children.length; i++) {
+            var c = body.children[i];
+            if (c.matches !== undefined && c.shown && c.matches)
+                return true;
+        }
+        return false;
+    }
+
     spacing: 8
 
     RowLayout {

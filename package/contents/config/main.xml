@@ -37,6 +37,14 @@
       <label>Open topology maps in their own window instead of the popup</label>
       <default>false</default>
     </entry>
+    <entry name="onlyMine" type="Bool">
+      <label>Hide labs other users deployed (shared lab servers)</label>
+      <default>false</default>
+    </entry>
+    <entry name="labFolders" type="StringList">
+      <label>Folders scanned for undeployed topologies (*.clab.yml, netlab topology.yml)</label>
+      <default></default>
+    </entry>
     <entry name="notifyNodeDown" type="Bool">
       <label>Notify when a running node goes down</label>
       <default>true</default>

@@ -3,8 +3,8 @@ import QtQuick.Layouts
 import "../../code/Labs.js" as Labs
 
 // One node under its expanded lab: role icon + state, name, kind/state/memory,
-// IP (click to copy); hover shows ssh / shell / logs (node.access), right-click
-// or ⋮ opens the menu.
+// IP (click to copy); hover shows ssh / shell / logs (node.access), a down
+// node always shows Start (node.ops); right-click opens the menu (restart…).
 Rectangle {
     id: item
 
@@ -13,6 +13,7 @@ Rectangle {
     property Item menuAnchor
     property bool copied: false
     readonly property var access: node.access || []
+    readonly property var ops: node.ops || []
     signal action(string name)
     signal copyRequested(string text)
     signal menuRequested(real x, real y)
@@ -117,6 +118,16 @@ Rectangle {
                 interval: 1200
                 onTriggered: item.copied = false
             }
+        }
+
+        // The fix-it: a down node's Start, always visible.
+        IconButton {
+            visible: item.ops.indexOf("start") >= 0
+            theme: item.theme
+            icon: "play"
+            tip: "Start " + item.node.name
+            size: 24
+            onClicked: item.action("start")
         }
 
         // Fixed width (room for all three), so the IP column lines up whether a

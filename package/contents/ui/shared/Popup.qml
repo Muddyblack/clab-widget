@@ -40,11 +40,24 @@ Item {
     property string page: "list" // list | map | settings | extra
     // The settings subtab (labs | alerts | look | placement | info).
     property alias settingsTab: settingsPage.currentTab
+    readonly property alias mapItem: mapView
+    property alias settingsQuery: settingsPage.query
     property string mapLabId: ""
     property bool searchOpen: false
     property string query: ""
     property var expanded: ({})
-    property var confirm: null // lab awaiting "stop" confirmation
+    property var confirm: null // lab awaiting a confirmation (stop / clean / force / redeploy)
+    property string confirmMode: "stop"
+    // Throughput per link: byte counters of the last two snapshots (--details).
+    property var prevSnapshot: null
+    property var rates: ({})
+    onSnapshotChanged: {
+        // The same observation again (a re-parse) keeps the last rates.
+        if (prevSnapshot && snapshot && prevSnapshot.observedAt === snapshot.observedAt)
+            return;
+        rates = Labs.linkRates(prevSnapshot, snapshot);
+        prevSnapshot = snapshot;
+    }
 
     readonly property var pins: cfg && cfg.pinned ? cfg.pinned : []
     readonly property string filter: cfg && cfg.tab ? cfg.tab : "all"
@@ -55,9 +68,10 @@ Item {
         filter: showChips ? filter : "all",
         query: query,
         expanded: expanded,
-        pins: pins
+        pins: pins,
+        onlyMine: cfg ? !!cfg.onlyMine : false
     })
-    readonly property var totals: Labs.totalsOf(Labs.visibleLabs(snapshot, Labs.normShow(cfg ? cfg.show : "both"), ""))
+    readonly property var totals: Labs.totalsOf(Labs.visibleLabs(snapshot, Labs.normShow(cfg ? cfg.show : "both"), "").filter(l => !(cfg && cfg.onlyMine && l.mine === false)))
     readonly property var mapLab: {
         var labs = snapshot ? snapshot.labs : [];
         for (var i = 0; i < labs.length; i++)
@@ -68,7 +82,7 @@ Item {
     readonly property real listHeight: {
         var h = 0;
         for (var i = 0; i < model.rows.length; i++)
-            h += model.rows[i].type === "lab" ? 38 : 30;
+            h += popup.rowHeight(model.rows[i].type);
         return h;
     }
     readonly property real bodyHeight: {
@@ -87,6 +101,10 @@ Item {
     implicitHeight: 2 * (framed ? 14 : 8) + header.height + 8 + (extras.visible ? extras.implicitHeight + 8 : 0) + bodyHeight
 
     onModelChanged: Labs.syncModel(rows, model.rows)
+
+    function rowHeight(type) {
+        return type === "lab" ? 38 : type === "undeployed" ? 34 : 30;
+    }
 
     function toggleExpanded(id, now) {
         var e = Object.assign({}, expanded);
@@ -107,8 +125,46 @@ Item {
             clipboard.put(lab.topologyFile || lab.dir);
         else if (name === "copy-name")
             clipboard.put(lab.name);
-        else if (name === "stop")
+        else if (name === "stop" || name === "clean" || name === "force" || name === "redeploy") {
+            confirmMode = name;
             confirm = lab;
+        } else if (name === "save")
+            run(Labs.labOpArgs(lab, "save"));
+        else if (name === "deploy")
+            run(Labs.deployArgs(lab));
+    }
+
+    // One entry point for every context menu (the popup's and map windows').
+    function menuAction(target, action) {
+        if (target.link)
+            linkAction(target.lab, target.link, action);
+        else if (target.node)
+            nodeAction(target.lab, target.node, action);
+        else
+            labAction(target.lab, action);
+    }
+
+    function confirmText(lab, mode) {
+        if (!lab)
+            return "";
+        var k8s = lab.via === "k8s", nl = lab.managedBy === "netlab";
+        var what = {
+            "stop": nl ? "netlab down " : k8s ? "Delete topology " : "Destroy ",
+            "clean": nl ? "netlab down --cleanup (delete generated files) " : "Destroy and delete lab files of ",
+            "force": "Force clean up (broken lab) ",
+            "redeploy": nl ? "netlab restart " : "Redeploy (fresh nodes, configs reset) "
+        }[mode] || "";
+        return what + lab.name + (k8s ? " (" + lab.namespace + ")?" : "?");
+    }
+
+    function runConfirmed() {
+        // The backend re-checks the fingerprint against a fresh snapshot.
+        if (confirmMode === "redeploy")
+            run(Labs.labOpArgs(confirm, "redeploy"));
+        else
+            run(Labs.stopArgs(confirm, confirmMode));
+        confirm = null;
+        refreshLater.restart();
     }
 
     // The map as a popup page, or in its own window (one per lab, raised if open).
@@ -139,18 +195,95 @@ Item {
     }
 
     function nodeAction(lab, node, name) {
-        if (name === "copy-ip")
-            clipboard.put(node.ipv4 || node.ipv6);
-        else if (name === "copy-name")
-            clipboard.put(node.name);
-        else if (name === "copy-container")
-            clipboard.put(node.container);
+        var copies = {
+            "copy-ip": node.ipv4 || node.ipv6,
+            "copy-name": node.name,
+            "copy-container": node.container,
+            "copy-mac": node.mac,
+            "copy-image": node.image,
+            "copy-kind": node.kind,
+            "copy-id": node.containerId
+        };
+        if (copies[name] !== undefined)
+            clipboard.put(copies[name] || "");
+        else if (name === "start" || name === "stop" || name === "restart") {
+            run(Labs.nodeOpArgs(lab, node, name));
+            refreshLater.restart();
+        } else if (name.indexOf("web:") === 0)
+            Qt.openUrlExternally(Labs.webUrl(node, parseInt(name.slice(4), 10)));
         else
             run(Labs.shellArgs(lab, node, name));
     }
 
+    function linkAction(lab, link, name) {
+        if (name === "copy-link")
+            clipboard.put(Labs.linkText(link, null).split(" · ")[0]);
+        else if (name === "capture-a" || name === "capture-z") {
+            var a = name === "capture-a";
+            var node = (lab.nodes || []).filter(n => n.name === (a ? (link.endA || link.a) : (link.endZ || link.z)))[0];
+            if (node)
+                run(Labs.captureArgs(lab, node, a ? link.aIf : link.zIf));
+        }
+    }
+
+    // Right-click on a map link: copy its ends, capture either end.
+    function linkMenu(lab, link, x, y, into) {
+        var items = [
+            {
+                icon: "copy",
+                text: "Copy endpoints",
+                action: "copy-link"
+            }
+        ];
+        var byName = {};
+        (lab.nodes || []).forEach(n => byName[n.name] = n);
+        var ws = snapshot && snapshot.tools && snapshot.tools.wireshark;
+        [["a", link.endA || link.a, link.aIf], ["z", link.endZ || link.z, link.zIf]].forEach(e => {
+            var n = byName[e[1]];
+            if (ws && n && n.capture && n.running && e[2])
+                items.push({
+                    icon: "activity",
+                    text: "Capture " + e[1] + ":" + e[2] + " in Wireshark",
+                    action: "capture-" + e[0]
+                });
+        });
+        var m = into || menu;
+        m.target = {
+            lab: lab,
+            link: link
+        };
+        m.popup(x, y, items);
+    }
+
     function labMenu(lab, x, y) {
         var acts = lab.actions || [];
+        if (acts.indexOf("deploy") >= 0) {
+            // An undeployed topology from the lab folders.
+            menu.target = {
+                lab: lab
+            };
+            menu.popup(x, y, [
+                {
+                    icon: "play",
+                    text: lab.managedBy === "netlab" ? "Deploy (netlab up)" : "Deploy",
+                    action: "deploy"
+                },
+                {
+                    icon: "external-link",
+                    text: "Open (app / VS Code)",
+                    action: "open"
+                },
+                {
+                    separator: true
+                },
+                {
+                    icon: "copy",
+                    text: "Copy topology path",
+                    action: "copy-path"
+                }
+            ]);
+            return;
+        }
         var open = model.byKey["L" + lab.id] ? model.byKey["L" + lab.id].expanded : false;
         var items = [
             {
@@ -187,6 +320,18 @@ Item {
                 text: "Copy topology path",
                 action: "copy-path"
             });
+        if (acts.indexOf("save") >= 0)
+            items.push({
+                icon: "save",
+                text: lab.managedBy === "netlab" ? "Save configs (netlab collect)" : "Save configs",
+                action: "save"
+            });
+        if (acts.indexOf("redeploy") >= 0)
+            items.push({
+                icon: "repeat",
+                text: lab.managedBy === "netlab" ? "Restart lab (netlab restart)…" : "Redeploy…",
+                action: "redeploy"
+            });
         if (acts.indexOf("stop") >= 0)
             items.push({
                 separator: true
@@ -194,6 +339,20 @@ Item {
                 icon: "square",
                 text: lab.managedBy === "netlab" ? "Stop (netlab down)…" : lab.via === "k8s" ? "Delete topology…" : "Destroy…",
                 action: "stop",
+                danger: true
+            });
+        if (acts.indexOf("clean") >= 0)
+            items.push({
+                icon: "square",
+                text: lab.managedBy === "netlab" ? "Stop and delete files…" : "Destroy and delete files…",
+                action: "clean",
+                danger: true
+            });
+        if (acts.indexOf("force") >= 0)
+            items.push({
+                icon: "square",
+                text: "Force clean up (broken)…",
+                action: "force",
                 danger: true
             });
         menu.target = {
@@ -205,7 +364,31 @@ Item {
     // `into`: another ContextMenu (the map window's); default the popup's own.
     function nodeMenu(lab, node, x, y, into) {
         var a = node.access || [];
+        var ops = node.ops || [];
         var items = [];
+        // The fix-it first: a down node offers Start (and why: its logs).
+        if (ops.indexOf("start") >= 0)
+            items.push({
+                icon: "play",
+                text: "Start " + node.name,
+                action: "start"
+            });
+        if (ops.indexOf("restart") >= 0)
+            items.push({
+                icon: "rotate-ccw",
+                text: "Restart",
+                action: "restart"
+            });
+        if (ops.indexOf("stop") >= 0)
+            items.push({
+                icon: "square",
+                text: "Stop",
+                action: "stop"
+            });
+        if (items.length)
+            items.push({
+                separator: true
+            });
         if (a.indexOf("connect") >= 0)
             items.push({
                 icon: "terminal",
@@ -224,13 +407,26 @@ Item {
                 text: "Shell (docker exec)",
                 action: "exec"
             });
+        if (a.indexOf("telnet") >= 0)
+            items.push({
+                icon: "terminal",
+                text: "Console (telnet)",
+                action: "telnet"
+            });
         if (a.indexOf("logs") >= 0)
             items.push({
                 icon: "scroll-text",
                 text: "Logs",
                 action: "logs"
             });
-        if (items.length)
+        // Web UIs only for labs on this machine: a remote host's mgmt network isn't reachable from here.
+        if (!lab.remote && node.running && (node.ipv4 || node.ipv6))
+            (node.webPorts || []).forEach(p => items.push({
+                    icon: "globe",
+                    text: "Open " + Labs.webUrl(node, p),
+                    action: "web:" + p
+                }));
+        if (items.length && !items[items.length - 1].separator)
             items.push({
                 separator: true
             });
@@ -250,6 +446,30 @@ Item {
                 icon: "copy",
                 text: "Copy container name",
                 action: "copy-container"
+            });
+        if (node.containerId)
+            items.push({
+                icon: "copy",
+                text: "Copy container ID",
+                action: "copy-id"
+            });
+        if (node.mac)
+            items.push({
+                icon: "copy",
+                text: "Copy MAC  " + node.mac,
+                action: "copy-mac"
+            });
+        if (node.image)
+            items.push({
+                icon: "copy",
+                text: "Copy image",
+                action: "copy-image"
+            });
+        if (node.kind)
+            items.push({
+                icon: "copy",
+                text: "Copy kind  " + node.kind,
+                action: "copy-kind"
             });
         var m = into || menu;
         m.target = {
@@ -467,7 +687,7 @@ Item {
                     anchors.rightMargin: 6
                     Text {
                         Layout.fillWidth: true
-                        text: popup.confirm ? (popup.confirm.managedBy === "netlab" ? "netlab down " : popup.confirm.via === "k8s" ? "Delete topology " : "Destroy ") + popup.confirm.name + (popup.confirm.via === "k8s" ? " (" + popup.confirm.namespace + ")?" : "?") : ""
+                        text: popup.confirmText(popup.confirm, popup.confirmMode)
                         color: popup.theme.text
                         font.pixelSize: popup.theme.fontSize
                         elide: Text.ElideRight
@@ -479,14 +699,9 @@ Item {
                     }
                     ActionButton {
                         theme: popup.theme
-                        text: "stop lab"
+                        text: popup.confirmMode === "redeploy" ? "redeploy" : "stop lab"
                         baseColor: Qt.rgba(0.97, 0.44, 0.44, 0.3)
-                        onClicked: {
-                            // The backend re-checks the fingerprint against a fresh snapshot.
-                            popup.run(["stop", popup.confirm.id, popup.confirm.fingerprint]);
-                            popup.confirm = null;
-                            refreshLater.restart();
-                        }
+                        onClicked: popup.runConfirmed()
                     }
                 }
             }
@@ -641,8 +856,8 @@ Item {
                     required property string type
                     readonly property var entry: popup.model.byKey[key]
                     width: list.width
-                    height: type === "lab" ? 38 : 30
-                    sourceComponent: !entry ? null : type === "lab" ? labRowC : nodeRowC
+                    height: popup.rowHeight(type)
+                    sourceComponent: !entry ? null : type === "lab" ? labRowC : type === "node" ? nodeRowC : type === "header" ? headerRowC : undeployedRowC
 
                     Component {
                         id: labRowC
@@ -672,6 +887,54 @@ Item {
                             onMenuRequested: (x, y) => popup.nodeMenu(rowLoader.entry.lab, node, x, y)
                         }
                     }
+                    // "Not deployed (3)": the lab-folder topologies, collapsible.
+                    Component {
+                        id: headerRowC
+                        Item {
+                            Rectangle {
+                                anchors.fill: parent
+                                anchors.topMargin: 4
+                                radius: 6
+                                color: headerMouse.containsMouse ? popup.theme.hover : "transparent"
+                            }
+                            Row {
+                                anchors.verticalCenter: parent.verticalCenter
+                                anchors.verticalCenterOffset: 2
+                                x: 6
+                                spacing: 6
+                                Icon {
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    name: rowLoader.entry.expanded ? "chevron-down" : "chevron-right"
+                                    size: 13
+                                    color: popup.theme.sub
+                                }
+                                Text {
+                                    text: rowLoader.entry.title.toUpperCase() + "  " + rowLoader.entry.count
+                                    color: popup.theme.sub
+                                    font.pixelSize: popup.theme.smallSize
+                                    font.letterSpacing: 1
+                                    font.bold: true
+                                }
+                            }
+                            MouseArea {
+                                id: headerMouse
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: popup.toggleExpanded("undeployed", rowLoader.entry.expanded)
+                            }
+                        }
+                    }
+                    Component {
+                        id: undeployedRowC
+                        UndeployedRow {
+                            theme: popup.theme
+                            lab: rowLoader.entry.lab
+                            menuAnchor: popup
+                            onDeploy: popup.labAction(lab, "deploy")
+                            onMenuRequested: (x, y) => popup.labMenu(lab, x, y)
+                        }
+                    }
                 }
             }
 
@@ -696,7 +959,9 @@ Item {
                         links: []
                     })
                 menuAnchor: popup
+                rates: popup.mapLab ? (popup.rates[popup.mapLab.id] || ({})) : ({})
                 onNodeMenu: (node, x, y) => popup.nodeMenu(popup.mapLab, node, x, y)
+                onLinkMenu: (link, x, y) => popup.linkMenu(popup.mapLab, link, x, y)
             }
 
             Flickable {
@@ -709,6 +974,7 @@ Item {
                     width: parent.width
                     theme: popup.theme
                     cfg: popup.cfg
+                    tools: popup.snapshot && popup.snapshot.tools ? popup.snapshot.tools : null
                     showPlacement: popup.showPlacement
                     showMode: popup.showMode
                     showHeader: false
@@ -734,11 +1000,6 @@ Item {
         id: menu
         property var target: null
         theme: popup.theme
-        onTriggered: action => {
-            if (target.node)
-                popup.nodeAction(target.lab, target.node, action);
-            else
-                popup.labAction(target.lab, action);
-        }
+        onTriggered: action => popup.menuAction(target, action)
     }
 }

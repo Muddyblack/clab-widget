@@ -21,6 +21,8 @@ ColumnLayout {
         smallSize: (typeof Kirigami !== "undefined" && Kirigami.Theme && Kirigami.Theme.smallFont.pixelSize > 0) ? Kirigami.Theme.smallFont.pixelSize : 11
     })
 
+    // snapshot.tools from the backend: {containerlab: {path, version, min, ok}, netlab: …}
+    property var tools: null
     readonly property string iconDir: Qt.resolvedUrl("../../icons/")
     property var counts: ({})
     property var contributorList: []
@@ -167,6 +169,78 @@ ColumnLayout {
         color: info.activeTheme.sub
         font.pixelSize: info.activeTheme.smallSize
         lineHeight: 1.25
+    }
+
+    // ── Installed tools ──────────────────────────────────────────────────────
+    Rectangle {
+        objectName: "toolVersions"
+        Layout.fillWidth: true
+        visible: !!info.tools && !!info.tools.containerlab
+        implicitHeight: toolsContent.implicitHeight + 20
+        radius: 8
+        color: info.activeTheme.card
+        border.color: info.activeTheme.border
+        border.width: 1
+
+        ColumnLayout {
+            id: toolsContent
+            anchors.fill: parent
+            anchors.margins: 10
+            spacing: 6
+
+            Text {
+                text: "On this machine"
+                color: info.activeTheme.text
+                font.pixelSize: info.activeTheme.smallSize
+                font.bold: true
+            }
+
+            Repeater {
+                model: ["containerlab", "netlab"]
+
+                RowLayout {
+                    id: toolRow
+                    required property string modelData
+                    readonly property var t: info.tools && info.tools[modelData] ? info.tools[modelData] : null
+                    readonly property color stateColor: !t || !t.path ? info.activeTheme.sub : t.ok ? info.activeTheme.ok : info.activeTheme.bad
+                    Layout.fillWidth: true
+                    spacing: 8
+
+                    Rectangle {
+                        width: 8; height: 8; radius: 4
+                        color: toolRow.stateColor
+                    }
+                    Text {
+                        text: toolRow.modelData
+                        color: info.activeTheme.text
+                        font.pixelSize: info.activeTheme.smallSize
+                        Layout.preferredWidth: 84
+                    }
+                    Text {
+                        objectName: "toolVersion_" + toolRow.modelData
+                        Layout.fillWidth: true
+                        elide: Text.ElideMiddle
+                        color: toolRow.stateColor
+                        font.pixelSize: info.activeTheme.smallSize - 1
+                        text: {
+                            const t = toolRow.t;
+                            if (!t || !t.path) return "not found · needs ≥ " + (t ? t.min : "?");
+                            if (!t.version) return "version unknown · needs ≥ " + t.min;
+                            return t.ok ? t.version + "  ✓  (≥ " + t.min + ")" : t.version + " is too old · needs ≥ " + t.min;
+                        }
+                    }
+                }
+            }
+
+            Text {
+                Layout.fillWidth: true
+                visible: !!info.tools && ["containerlab", "netlab"].some(k => info.tools[k] && info.tools[k].path && !info.tools[k].ok)
+                text: "Update the red one: some actions (node start/stop, netlab status) won't work with it."
+                wrapMode: Text.WordWrap
+                color: info.activeTheme.bad
+                font.pixelSize: info.activeTheme.smallSize - 1
+            }
+        }
     }
 
     // ── Version Card ─────────────────────────────────────────────────────────

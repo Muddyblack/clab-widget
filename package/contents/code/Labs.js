@@ -302,7 +302,11 @@ function mapGraph(lab) {
     for (i = 0; i < links.length; i++)
         out.push(Object.assign({}, links[i], {
             a: end(links[i].a, links[i].aIf),
-            z: end(links[i].z, links[i].zIf)
+            z: end(links[i].z, links[i].zIf),
+            // The link as the snapshot names it (rates, text, capture).
+            key: linkKey(links[i]),
+            endA: links[i].a,
+            endZ: links[i].z
         }));
     return {
         nodes: ext.length ? nodes.concat(ext) : nodes,
@@ -409,8 +413,117 @@ function fileUrl(path) {
     return "file://" + (p.charAt(0) === "/" ? "" : "/") + encodeURI(p);
 }
 
-function sourceArgs(show) {
-    return show === "containerlab" ? ["--no-netlab"] : [];
+// Snapshot flags: which tools to ask, and the lab folders to scan for
+// undeployed topologies (settings "Lab folders").
+function sourceArgs(show, folders) {
+    var args = show === "containerlab" ? ["--no-netlab"] : [];
+    var list = folders || [];
+    for (var i = 0; i < list.length; i++)
+        if (String(list[i]).trim() !== "")
+            args.push("--scan", String(list[i]).trim());
+    return args;
+}
+
+// clab-status argv for the lab / node actions. Each re-checks the lab's
+// fingerprint before it runs.
+function nodeOpArgs(lab, node, op) {
+    return ["node", op, lab.id, node.name, lab.fingerprint];
+}
+
+function labOpArgs(lab, op) {
+    return ["lab", op, lab.id, lab.fingerprint];
+}
+
+// mode: "stop" | "clean" (and delete generated files) | "force" (broken lab)
+function stopArgs(lab, mode) {
+    var args = ["stop", lab.id, lab.fingerprint];
+    return mode && mode !== "stop" ? args.concat([mode]) : args;
+}
+
+function deployArgs(u) {
+    return ["deploy", u.topologyFile];
+}
+
+// A link end's capture (docker exec tcpdump | wireshark), on its ssh / WSL host if remote.
+function captureArgs(lab, node, iface) {
+    var args = ["capture", node.container, iface];
+    return lab.via === "ssh" || lab.via === "wsl" ? args.concat(["--via", lab.conn]) : args;
+}
+
+// Web UI of a node listening on `port` (only reachable for labs on this machine).
+function webUrl(node, port) {
+    var https = port === 443 || port === 8443;
+    var host = node.ipv4 || (node.ipv6 ? "[" + node.ipv6 + "]" : "");
+    var dflt = (https && port === 443) || (!https && port === 80);
+    return (https ? "https" : "http") + "://" + host + (dflt ? "" : ":" + port);
+}
+
+function linkKey(link) {
+    return link.a + ":" + (link.aIf || "") + "|" + link.z + ":" + (link.zIf || "");
+}
+
+// Throughput per link from two snapshots' byte counters (--details):
+// {labId: {linkKey: {rx, tx, end}}} in bit/s, as seen from `end`.
+function linkRates(prev, snap) {
+    var out = {};
+    if (!prev || !snap || !prev.labs || !snap.labs)
+        return out;
+    var dt = (Date.parse(snap.observedAt) - Date.parse(prev.observedAt)) / 1000;
+    if (!(dt > 0))
+        return out;
+    var before = {}, i, j, lab, l;
+    for (i = 0; i < prev.labs.length; i++) {
+        lab = prev.labs[i];
+        for (j = 0; j < (lab.links || []).length; j++) {
+            l = lab.links[j];
+            if (l.bytes)
+                before[lab.id + "#" + linkKey(l)] = l.bytes;
+        }
+    }
+    for (i = 0; i < snap.labs.length; i++) {
+        lab = snap.labs[i];
+        for (j = 0; j < (lab.links || []).length; j++) {
+            l = lab.links[j];
+            var b = before[lab.id + "#" + linkKey(l)];
+            if (!l.bytes || !b || b.end !== l.bytes.end)
+                continue;
+            var rx = l.bytes.rx - b.rx, tx = l.bytes.tx - b.tx;
+            if (rx < 0 || tx < 0)
+                continue; // counters restarted with the node
+            if (!out[lab.id])
+                out[lab.id] = {};
+            out[lab.id][linkKey(l)] = {
+                rx: rx * 8 / dt,
+                tx: tx * 8 / dt,
+                end: l.bytes.end
+            };
+        }
+    }
+    return out;
+}
+
+function bitRate(bps) {
+    if (bps < 1000)
+        return Math.round(bps) + " b/s";
+    var units = ["kb/s", "Mb/s", "Gb/s"], v = bps / 1000, u = 0;
+    while (v >= 1000 && u < units.length - 1) {
+        v /= 1000;
+        u++;
+    }
+    return (v < 10 ? v.toFixed(1) : Math.round(v)) + " " + units[u];
+}
+
+// "spine1:e1-1 ↔ leaf1:e1-49 · up · ↑ 1.2 Mb/s ↓ 40 kb/s"
+function linkText(link, rate) {
+    var a = link.endA || link.a, z = link.endZ || link.z;
+    var t = a + (link.aIf ? ":" + link.aIf : "") + " ↔ " + z + (link.zIf ? ":" + link.zIf : "");
+    if (link.up === true)
+        t += " · up";
+    else if (link.up === false)
+        t += " · down";
+    if (rate)
+        t += " · ↑ " + bitRate(rate.tx) + " ↓ " + bitRate(rate.rx);
+    return t;
 }
 
 // clab-status argv for "open" and node shells. Labs on an ssh host carry their
@@ -460,10 +573,16 @@ function totalsOf(labs) {
 
 // Snapshot narrowed to what the user chose to see (panel counts, notifications).
 // Tabs still count everything: both tabs are "shown".
-function shownSnapshot(snap, show) {
-    if (!snap || show === "tabs" || show === "both" || show === "containerlab")
+// What the panel item / tray count and notify about: the Show setting and,
+// with onlyMine, without labs other users deployed.
+function shownSnapshot(snap, show, onlyMine) {
+    if (!snap || ((show === "tabs" || show === "both" || show === "containerlab") && !onlyMine))
         return snap;
-    var labs = visibleLabs(snap, show, "");
+    var labs = visibleLabs(snap, show === "netlab" ? show : "both", "");
+    if (onlyMine)
+        labs = labs.filter(function (lab) {
+            return lab.mine !== false;
+        });
     var out = {};
     for (var k in snap)
         out[k] = snap[k];
@@ -724,6 +843,8 @@ function rowsFor(snap, o) {
         var lab = ordered[i];
         if (show !== "both" && lab.managedBy !== show)
             continue;
+        if (o.onlyMine && lab.mine === false)
+            continue;
         var nodes = lab.nodes;
         var labHit = q === "" || labMatches(q, lab);
         if (q !== "" && !labHit) {
@@ -765,6 +886,39 @@ function rowsFor(snap, o) {
                 node: nodes[j]
             };
         }
+    }
+    // Undeployed topologies from the lab folders: a collapsible group at the end.
+    var und = snap && snap.undeployed ? snap.undeployed : [];
+    var shownUnd = und.filter(function (u) {
+        if (show !== "both" && u.managedBy !== show)
+            return false;
+        if (o.filter && o.filter !== "all" && u.managedBy !== o.filter)
+            return false;
+        return q === "" || u.name.toLowerCase().indexOf(q) >= 0 || u.topologyFile.toLowerCase().indexOf(q) >= 0;
+    });
+    if (shownUnd.length > 0) {
+        var want = o.expanded ? o.expanded["undeployed"] : undefined;
+        // Open by default when nothing runs, or a search found some.
+        var openUnd = want !== undefined ? want : (labs.length === 0 || q !== "");
+        rows.push({
+            key: "Hundeployed",
+            type: "header"
+        });
+        byKey["Hundeployed"] = {
+            title: "Not deployed",
+            count: shownUnd.length,
+            expanded: openUnd
+        };
+        if (openUnd)
+            for (var u = 0; u < shownUnd.length; u++) {
+                rows.push({
+                    key: "U" + shownUnd[u].id,
+                    type: "undeployed"
+                });
+                byKey["U" + shownUnd[u].id] = {
+                    lab: shownUnd[u]
+                };
+            }
     }
     return {
         rows: rows,

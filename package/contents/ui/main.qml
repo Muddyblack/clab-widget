@@ -18,7 +18,7 @@ PlasmoidItem {
     property var tracker: Labs.newTracker()
 
     // What the panel counts and notifications cover: the labs the user chose to see.
-    readonly property var shown: Labs.shownSnapshot(snapshot, Plasmoid.configuration.show)
+    readonly property var shown: Labs.shownSnapshot(snapshot, Plasmoid.configuration.show, Plasmoid.configuration.onlyMine)
     readonly property var totals: shown ? shown.totals : null
     readonly property var pins: Plasmoid.configuration.pinned || []
     readonly property var pinnedSegs: Labs.pinnedSegments(snapshot, pins)
@@ -63,7 +63,7 @@ PlasmoidItem {
         // Memory + netlab per-node state are slow to collect; only while open.
         if (root.expanded)
             args.push("--details");
-        args = args.concat(Labs.sourceArgs(Plasmoid.configuration.show));
+        args = args.concat(Labs.sourceArgs(Plasmoid.configuration.show, Plasmoid.configuration.labFolders));
         var cmd = root.tool(args);
         snapshotSource.disconnectSource(cmd);
         snapshotSource.connectSource(cmd);
@@ -99,7 +99,7 @@ PlasmoidItem {
             root.snapshot = snap;
             root.lastOkAt = Date.now();
             root.failing = false;
-            root.notifyChanges(Labs.shownSnapshot(snap, Plasmoid.configuration.show));
+            root.notifyChanges(Labs.shownSnapshot(snap, Plasmoid.configuration.show, Plasmoid.configuration.onlyMine));
         }
     }
 
@@ -182,6 +182,9 @@ PlasmoidItem {
     Connections {
         target: Plasmoid.configuration
         function onShowChanged() {
+            root.refresh();
+        }
+        function onLabFoldersChanged() {
             root.refresh();
         }
     }

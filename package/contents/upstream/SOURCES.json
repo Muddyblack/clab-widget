@@ -1,10 +1,10 @@
 {
-  "repos": {
-    "clab-ui": "https://github.com/srl-labs/clab-ui",
-    "vscode-containerlab": "https://github.com/srl-labs/vscode-containerlab"
-  },
+  "repo": "https://github.com/srl-labs/containerlab-app",
+  "paths": [
+    "packages/clab-ui",
+    "apps/vscode-containerlab"
+  ],
   "commits": {
-    "clab-ui": "62b2eeb525ea11d47346f216c482dbe66b95068a",
-    "vscode-containerlab": "6df8e9629a0dfca625d162498aa976d49845a342"
+    "containerlab-app": "be0ec244e60367a5e1f3aa8b5b68af6290ac4654"
   }
 }

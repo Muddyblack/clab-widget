@@ -89,7 +89,9 @@ Window {
                     links: []
                 })
             menuAnchor: menu
+            rates: win.lab ? (win.popup.rates[win.lab.id] || ({})) : ({})
             onNodeMenu: (node, x, y) => win.popup.nodeMenu(win.lab, node, x, y, menu)
+            onLinkMenu: (link, x, y) => win.popup.linkMenu(win.lab, link, x, y, menu)
         }
     }
 
@@ -97,6 +99,6 @@ Window {
         id: menu
         property var target: null
         theme: win.theme
-        onTriggered: action => win.popup.nodeAction(target.lab, target.node, action)
+        onTriggered: action => win.popup.menuAction(target, action)
     }
 }

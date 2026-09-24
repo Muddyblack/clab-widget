@@ -32,10 +32,33 @@
         "attention": { "type": "integer", "minimum": 0, "description": "Labs that are partial or stopped." }
       }
     },
-    "labs": { "type": "array", "items": { "$ref": "#/$defs/lab" } }
+    "labs": { "type": "array", "items": { "$ref": "#/$defs/lab" } },
+    "tools": { "type": "object", "properties": { "wireshark": { "type": "boolean", "description": "Wireshark found here: link captures possible." }, "containerlab": { "$ref": "#/$defs/toolVersion" }, "netlab": { "$ref": "#/$defs/toolVersion" } } },
+    "undeployed": {
+      "type": "array",
+      "description": "Topologies under the --scan folders that aren't deployed (Deploy starts them).",
+      "items": {
+        "type": "object",
+        "required": ["id", "name", "managedBy", "topologyFile", "dir", "actions"],
+        "properties": {
+          "id": { "type": "string", "description": "file:<topology path>" },
+          "name": { "type": "string" },
+          "managedBy": { "enum": ["containerlab", "netlab"] },
+          "topologyFile": { "type": "string" },
+          "dir": { "type": "string" },
+          "actions": { "type": "array", "items": { "enum": ["deploy", "open", "copy"] } }
+        }
+      }
+    }
   },
   "$defs": {
     "lifecycle": { "enum": ["running", "partial", "stopped", "starting", "unknown"] },
+    "toolVersion": {
+      "type": "object",
+      "description": "Installed tool on this machine: path (null = not found), parsed version, minimum the widget needs, ok = found and new enough.",
+      "required": ["path", "version", "min", "ok"],
+      "properties": { "path": { "type": ["string", "null"] }, "version": { "type": ["string", "null"] }, "min": { "type": "string" }, "ok": { "type": "boolean" } }
+    },
     "lab": {
       "type": "object",
       "required": ["id", "name", "managedBy", "providers", "dir", "nodesKnown", "nodes", "running", "total", "lifecycle", "fingerprint", "actions", "links"],
@@ -61,6 +84,12 @@
             "properties": {
               "a": { "type": "string" }, "aIf": { "type": "string" },
               "z": { "type": "string" }, "zIf": { "type": "string" },
+              "bytes": {
+                "type": "object",
+                "required": ["end", "rx", "tx"],
+                "description": "Byte counters of the link's interface on node `end` (throughput = change between snapshots).",
+                "properties": { "end": { "type": "string" }, "rx": { "type": "integer", "minimum": 0 }, "tx": { "type": "integer", "minimum": 0 } }
+              },
               "up": { "type": "boolean", "description": "--details, containerlab only: every node end's interface is up. Absent = not known. An end naming no lab node (host, macvlan, mgmt-net) is outside the lab and doesn't count." }
             }
           }
@@ -72,7 +101,12 @@
         "memoryBytes": { "type": ["integer", "null"], "minimum": 0, "description": "null = not measured (never 0 for unknown)." },
         "memoryCoverage": { "enum": ["full", "partial", "none"] },
         "fingerprint": { "type": "string", "description": "Owner + topology + containers; lifecycle actions refuse to run if it changed." },
-        "actions": { "type": "array", "items": { "enum": ["copy", "open", "shell", "stop"] } },
+        "actions": {
+          "type": "array",
+          "items": { "enum": ["copy", "open", "shell", "stop", "clean", "force", "redeploy", "save"] },
+          "description": "stop: through its owner; clean: stop and delete generated files (--cleanup); force: clean up a broken lab; redeploy: a partial / stopped lab; save: its running configs."
+        },
+        "mine": { "type": "boolean", "description": "false only for a lab another user deployed." },
         "remote": { "type": "boolean" },
         "host": { "type": "string" },
         "hostUrl": { "type": "string" },
@@ -94,6 +128,11 @@
         "container": { "type": "string" },
         "kind": { "type": "string" },
         "image": { "type": "string" },
+        "containerId": { "type": "string" },
+        "mac": { "type": "string", "description": "Management MAC (eth0), read while the popup is open." },
+        "capture": { "type": "boolean", "description": "tcpdump is in the image: its links can be captured into Wireshark." },
+        "webPorts": { "type": "array", "items": { "type": "integer" }, "description": "Listening web ports (80, 443, 8080…)." },
+        "ops": { "type": "array", "items": { "enum": ["start", "stop", "restart"] }, "description": "containerlab start|stop|restart --node (links kept); clabernetes: restart." },
         "group": { "type": "string" },
         "state": { "type": "string" },
         "status": { "type": "string" },
@@ -110,7 +149,7 @@
           "required": ["x", "y"],
           "properties": { "x": { "type": "number" }, "y": { "type": "number" } }
         },
-        "access": { "type": "array", "items": { "enum": ["ssh", "connect", "exec", "logs"] } }
+        "access": { "type": "array", "items": { "enum": ["ssh", "connect", "exec", "logs", "telnet"] } }
       }
     }
   }

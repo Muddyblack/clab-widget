@@ -11,6 +11,20 @@ ColumnLayout {
     property string desc
     property bool first: false
     property bool stacked: false
+    // Stacked controls that take the whole width (lists, fields): the slot's
+    // width comes from the row, not from the control.
+    property bool fill: false
+    // `shown`: the row's own condition; `query`: the settings search. A row
+    // shows when both allow it.
+    property bool shown: true
+    property string query: ""
+    // The section's title (set by SettingsSection): "notif" finds its rows too.
+    property string context: ""
+    readonly property bool matches: query === "" || (context + " " + label + " " + desc).toLowerCase().indexOf(query.toLowerCase()) >= 0
+    // Narrow popups stack the control under the label, like the studio.
+    readonly property bool narrow: width > 0 && width - slot.implicitWidth - 18 < 190
+
+    visible: shown && matches
     default property alias control: slot.data
 
     Layout.fillWidth: true
@@ -27,7 +41,7 @@ ColumnLayout {
         Layout.fillWidth: true
         Layout.topMargin: 12
         Layout.bottomMargin: 12
-        columns: row.stacked ? 1 : 2
+        columns: row.stacked || row.narrow ? 1 : 2
         columnSpacing: 18
         rowSpacing: 10
 
@@ -54,9 +68,9 @@ ColumnLayout {
 
         Item {
             id: slot
-            Layout.alignment: row.stacked ? Qt.AlignLeft : (Qt.AlignRight | Qt.AlignVCenter)
+            Layout.alignment: row.stacked || row.narrow ? Qt.AlignLeft : (Qt.AlignRight | Qt.AlignVCenter)
             Layout.fillWidth: row.stacked
-            implicitWidth: childrenRect.width
+            implicitWidth: row.fill ? 0 : childrenRect.width
             implicitHeight: childrenRect.height
         }
     }

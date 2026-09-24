@@ -8,6 +8,7 @@ import importlib.util
 import json
 import os
 import re
+import sys
 import tempfile
 import unittest
 
@@ -278,7 +279,9 @@ class LinkState(unittest.TestCase):
         return {"managedBy": "containerlab", "providers": ["containerlab"], "nodes": nodes, "links": links}
 
     def test_parse_operstates(self):
-        self.assertEqual(cs.parse_operstates("lo unknown\neth1 up\nbroken\n"), {"lo": "unknown", "eth1": "up"})
+        self.assertEqual(
+            cs.parse_probe("if lo unknown\nif eth1 up\nbroken\n")["ifaces"], {"lo": "unknown", "eth1": "up"}
+        )
 
     def test_up_down_and_unknown(self):
         states = {
@@ -304,8 +307,31 @@ class LinkState(unittest.TestCase):
         r1 = {"name": "r1", "container": "r1", "running": True}
         vm = {"managedBy": "netlab", "providers": ["libvirt"], "nodes": [r1]}
         vm["links"] = [{"a": "r1", "aIf": "eth1", "z": "r2", "zIf": "eth1"}]
-        bare = self.lab([])
-        cs.add_link_state([vm, bare], lambda c: self.fail("asked " + c))
+        cs.add_link_state([vm], lambda c: self.fail("asked " + c))
+
+    def test_probe_extras(self):
+        text = (
+            "if lo unknown 10 10\nif eth0 up 5000 7000\nif eth1 up 100 200\n"
+            "mac aa:c1:ab:00:00:01\ntcpdump\ntcp\n"
+            "  sl  local_address rem_address   st\n"
+            "   0: 00000000:01BB 00000000:0000 0A 0\n"  # :443 listening
+            "   1: 0100007F:1388 00000000:0000 0A 0\n"  # :5000 listening, not a web port
+            "   2: 0A00000B:C350 0A00000C:0016 01 0\n"  # an established connection
+        )
+        probe = cs.parse_probe(text)
+        self.assertEqual(probe["ifaces"]["eth1"], "up")
+        self.assertEqual(probe["counters"]["eth0"], [5000, 7000])
+        self.assertEqual(probe["mac"], "aa:c1:ab:00:00:01")
+        self.assertTrue(probe["tcpdump"])
+        self.assertEqual(probe["ports"], [443, 5000])
+        links = [{"a": "a", "aIf": "eth1", "z": "b", "zIf": "eth1"}]
+        lab = self.lab(links)
+        cs.add_link_state([lab], lambda c: probe if c == "clab-x-a" else {"eth1": "up"})
+        a, b = lab["nodes"][0], lab["nodes"][1]
+        self.assertEqual((a["mac"], a["capture"], a["webPorts"]), ("aa:c1:ab:00:00:01", True, [443]))
+        self.assertEqual((b.get("mac"), b["capture"], b["webPorts"]), (None, False, []))  # saved demo form
+        self.assertEqual(links[0]["bytes"], {"end": "a", "rx": 100, "tx": 200})
+        self.assertTrue(links[0]["up"])
 
     def test_demo_snapshot(self):
         with tempfile.TemporaryDirectory() as d:
@@ -719,8 +745,10 @@ class SshPlans(unittest.TestCase):
         argv = cs.ssh_stop_plan(self.conn, clab)
         self.assertIn("destroy -t /srv/fab.clab.yml", argv[-1])
         self.assertIn("-t", argv)
-        argv = cs.ssh_stop_plan(self.conn, {"managedBy": "netlab", "dir": "/srv/x"})
+        argv = cs.ssh_stop_plan(self.conn, {"managedBy": "netlab", "dir": "/srv/x", "name": "x"})
         self.assertIn("netlab down", argv[-1])
+        argv = cs.ssh_stop_plan(self.conn, {"managedBy": "netlab", "dir": "/srv/x", "name": "x"}, "clean")
+        self.assertIn("netlab down --cleanup", argv[-1])
         argv = cs.ssh_open_plan(self.conn, "/srv", lambda b: "/bin/" + b if b == "code" else None)
         self.assertEqual(argv, ["/bin/code", "--remote", "ssh-remote+me@box", "/srv"])
 
@@ -876,9 +904,13 @@ class Lifecycle(unittest.TestCase):
 
     def test_actions_by_owner(self):
         (dc,) = by_name(self.snap, "dc")
-        self.assertEqual(dc["actions"], ["copy", "open", "shell", "stop"])
+        self.assertEqual(dc["actions"], ["copy", "open", "shell", "stop", "clean", "save"])
         (vm,) = by_name(self.snap, "vmlab")
-        self.assertEqual(vm["actions"], ["copy", "open", "stop"])  # netlab down; no node shells yet
+        # netlab down (+ --cleanup); no node shells yet; nothing known running to save
+        self.assertEqual(vm["actions"][:4], ["copy", "open", "stop", "clean"])
+        partial = next(lab for lab in self.snap["labs"] if lab["lifecycle"] == "partial")
+        self.assertIn("redeploy", partial["actions"])
+        self.assertIn("force", partial["actions"])
 
     def test_remote_actions(self):
         lab = {"managedBy": "containerlab", "remote": True, "apiUrl": "http://x", "nodes": [], "nodesKnown": True}
@@ -904,18 +936,60 @@ class Lifecycle(unittest.TestCase):
         dc["nodes"].append({"name": "new", "container": "clab-dc-new"})
         self.assertNotEqual(cs.fingerprint(dc), before)
 
-    def test_stop_plans(self):
-        which = {"containerlab": "/nix/bin/containerlab", "netlab": "/nix/bin/netlab"}.get
+    def run_stop(self, lab, mode, admin=True, dirs=()):
+        """Run stop_script with fake tools on PATH; the commands they got."""
+        import subprocess
+
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        bin_dir, log = os.path.join(tmp.name, "bin"), os.path.join(tmp.name, "log")
+        os.makedirs(bin_dir)
+        for d in dirs:
+            os.makedirs(d, exist_ok=True)
+        fakes = {
+            "containerlab": 'echo "containerlab $*" >> "$LOG"',
+            "netlab": 'echo "netlab $*" >> "$LOG"',
+            "sudo": 'echo "sudo:" >> "$LOG"; "$@"',
+            "id": f'case "$1" in -u) echo {"0" if admin else "1000"};; *) echo users;; esac',
+        }
+        for name, body in fakes.items():
+            path = os.path.join(bin_dir, name)
+            with open(path, "w") as f:
+                f.write("#!/bin/sh\n" + body + "\n")
+            os.chmod(path, 0o755)
+        env = {"PATH": bin_dir + ":/usr/bin:/bin", "LOG": log}
+        subprocess.run(["sh", "-c", cs.stop_script(lab, mode)], env=env, capture_output=True, check=False)
+        with open(log) as f:
+            return [ln for ln in f.read().splitlines() if ln != "sudo:"], "sudo:" in open(log).read()
+
+    @unittest.skipIf(os.name == "nt", "runs the shell scripts")
+    def test_stop_modes(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(__import__("shutil").rmtree, tmp, True)
+        topo = os.path.join(tmp, "my lab", "dc.clab.yml")
+        os.makedirs(os.path.dirname(topo))
+        open(topo, "w").close()
+        dc = {"managedBy": "containerlab", "name": "dc", "clabName": "dc", "topologyFile": topo}
+        self.assertEqual(self.run_stop(dc, "stop"), ([f"containerlab destroy -t {topo}"], False))
+        self.assertEqual(self.run_stop(dc, "clean", admin=False), ([f"containerlab destroy -t {topo} --cleanup"], True))
+        self.assertEqual(self.run_stop(dc, "force")[0], [f"containerlab destroy -t {topo} --cleanup"])
+        gone = dict(dc, topologyFile=os.path.join(tmp, "gone.clab.yml"))
+        self.assertEqual(self.run_stop(gone, "force")[0], ["containerlab destroy --name dc --cleanup"])
+
+        nl_dir = os.path.join(tmp, "net lab")
+        nl = {"managedBy": "netlab", "name": "nl", "clabName": "nl", "dir": nl_dir}
+        self.assertEqual(self.run_stop(nl, "stop", dirs=[nl_dir])[0], ["netlab down"])
+        self.assertEqual(self.run_stop(nl, "clean", dirs=[nl_dir])[0], ["netlab down --cleanup"])
+        self.assertEqual(self.run_stop(nl, "force", dirs=[nl_dir])[0], ["netlab down --force --cleanup"])
+        broken = dict(nl, dir=os.path.join(tmp, "deleted"))
+        self.assertEqual(self.run_stop(broken, "force")[0], ["containerlab destroy --name nl --cleanup"])
+
+    def test_stop_actions(self):
         (dc,) = by_name(self.snap, "dc")
-        argv, cwd = cs.stop_plan(dc, which=which, in_admin_group=False)
-        self.assertEqual(argv, ["sudo", "/nix/bin/containerlab", "destroy", "-t", "/home/u/labs/dc/dc.clab.yml"])
-        self.assertEqual(cwd, "/home/u/labs/dc")
-        argv, _ = cs.stop_plan(dc, which=which, in_admin_group=True)
-        self.assertEqual(argv[0], "/nix/bin/containerlab")
-        (nl,) = by_name(self.snap, "nl")
-        argv, cwd = cs.stop_plan(nl, which=which)
-        self.assertEqual(argv[-2:], ["/home/u/netlab/nl", "/nix/bin/netlab"])  # netlab down in its dir
-        self.assertIn("down", argv[2])
+        self.assertIn("clean", dc["actions"])
+        self.assertNotIn("force", dc["actions"])  # running fine
+        broken = [lab for lab in self.snap["labs"] if lab["lifecycle"] in ("partial", "stopped")]
+        self.assertTrue(broken and all("force" in lab["actions"] for lab in broken))
 
 
 class RemoteDestroy(Remote):
@@ -943,6 +1017,224 @@ class RemoteDestroy(Remote):
         self.assertEqual(cs.remote_destroy(dead, "t", "fab"), (False, "unreachable"))
 
 
+class NodeOps(unittest.TestCase):
+    """Node start / stop / restart through containerlab's lifecycle commands."""
+
+    def test_ops_by_state_and_source(self):
+        snap = snapshot("clab_mixed.json", "netlab_mixed.json")
+        (dc,) = by_name(snap, "dc")
+        self.assertEqual(dc["nodes"][0]["ops"], ["restart", "stop"])
+        (nl,) = by_name(snap, "nl")
+        r2 = next(n for n in nl["nodes"] if n["name"] == "r2")
+        self.assertEqual(r2["ops"], ["start"])  # netlab on clab: its clab.yml
+        lab = {"managedBy": "netlab", "topologyFile": "", "dir": "/l"}
+        self.assertEqual(cs.node_ops(lab, {"running": False, "container": "vm", "provider": "libvirt"}), [])
+        api = {"remote": True, "topologyFile": "/x.clab.yml", "apiUrl": "http://x"}
+        self.assertEqual(cs.node_ops(api, {"running": True, "container": "c"}), [])
+        ssh = dict(api, via="ssh")
+        self.assertEqual(cs.node_ops(ssh, {"running": True, "container": "c"}), ["restart", "stop"])
+        self.assertEqual(cs.node_ops({"via": "k8s"}, {"running": False, "container": "ns/n"}), ["restart"])
+
+    def test_plans(self):
+        which = lambda b: "/bin/" + b  # noqa: E731
+        self.assertEqual(
+            cs.clab_plan(["stop", "-t", "/l/a.clab.yml", "--node", "r1"], which, admin=True),
+            (["/bin/containerlab", "stop", "-t", "/l/a.clab.yml", "--node", "r1"], False),
+        )
+        argv, terminal = cs.clab_plan(["start", "-t", "a", "--node", "r1"], which, admin=False)
+        self.assertEqual((argv[0], terminal), ("sudo", True))
+        script = cs.remote_clab_script(["restart", "-t", "/srv/my lab.clab.yml", "--node", "r1"])
+        self.assertIn("sudo \"$C\" restart -t '/srv/my lab.clab.yml' --node r1", script)
+        conn = {"name": "k", "type": "k8s", "context": "k3s"}
+        argv = cs.k8s_restart_plan(conn, {"namespace": "ns", "name": "srl02"}, {"name": "srl1"})
+        self.assertEqual(argv[-3:], ["--wait=false", "-l", "c9s.run/topologyOwner=srl02,c9s.run/topologyNode=srl1"])
+
+    def test_cmd_rechecks_the_node(self):
+        from unittest import mock
+
+        snap = snapshot("clab_mixed.json", "netlab_mixed.json")
+        (dc,) = by_name(snap, "dc")
+        name = dc["nodes"][0]["name"]
+        ran, notes = [], []
+        with (
+            mock.patch.object(cs, "take_snapshot", lambda _a: snap),
+            mock.patch.object(cs, "in_clab_admins", lambda: True),
+            mock.patch.object(cs, "run_quietly", lambda argv, **_k: (ran.append(argv), (True, ""))[1]),
+            mock.patch.object(cs, "cmd_notify", notes.append),
+        ):
+            self.assertEqual(cs.cmd_node(["restart", dc["id"], name, dc["fingerprint"]]), 0)
+            self.assertEqual(ran[0][1:], ["restart", "-t", dc["topologyFile"], "--node", name])
+            self.assertEqual(cs.cmd_node(["start", dc["id"], name, dc["fingerprint"]]), 3)  # it's running
+            self.assertEqual(cs.cmd_node(["stop", dc["id"], name, "stale"]), 3)
+        self.assertEqual(len(ran), 1)
+        self.assertIn("changed", notes[-1][1])
+
+
+class ToolVersions(unittest.TestCase):
+    CLAB = "  ____ _       _    ____\n version: 0.75.2\n commit: abc\n"
+
+    def test_parse_and_minimum(self):
+        self.assertEqual(cs.parse_version(self.CLAB), "0.75.2")
+        self.assertEqual(cs.parse_version("netlab version 26.9"), "26.9")
+        self.assertTrue(cs.version_info("containerlab", "/bin/c", self.CLAB)["ok"])
+        old = cs.version_info("containerlab", "/bin/c", "version: 0.68.0")
+        self.assertEqual((old["version"], old["min"], old["ok"]), ("0.68.0", "0.75.0", False))
+        self.assertFalse(cs.version_info("netlab", "/bin/n", "netlab version 26.1")["ok"])
+        self.assertTrue(cs.version_info("netlab", "/bin/n", "netlab version 26.2")["ok"])
+        missing = cs.version_info("netlab", None, "")
+        self.assertEqual((missing["path"], missing["version"], missing["ok"]), (None, None, False))
+
+    def test_cached_per_binary(self):
+        calls = []
+
+        def run(argv):
+            calls.append(argv)
+            return self.CLAB
+
+        which = {"containerlab": sys.executable, "netlab": None}.get
+        with tempfile.TemporaryDirectory() as d:
+            cache = os.path.join(d, "versions.json")
+            first = cs.tool_versions(which, run, cache)
+            second = cs.tool_versions(which, run, cache)
+        self.assertEqual(first, second)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(first["containerlab"]["version"], "0.75.2")
+        self.assertFalse(first["netlab"]["ok"])
+
+
+@unittest.skipIf(os.name != "posix", "extend_path runs on POSIX only")
+class ToolPath(unittest.TestCase):
+    def test_installed_tools_are_found(self):
+        env = {"PATH": "/usr/bin:/run/current-system/sw/bin", "USER": "me"}
+        present = {"/run/wrappers/bin", "/etc/profiles/per-user/me/bin", "/run/current-system/sw/bin", "/usr/local/bin"}
+        cs.extend_path(env, isdir=lambda d: d in present)
+        self.assertEqual(
+            env["PATH"].split(os.pathsep),
+            [
+                "/usr/bin",
+                "/run/current-system/sw/bin",
+                "/run/wrappers/bin",
+                "/etc/profiles/per-user/me/bin",
+                "/usr/local/bin",
+            ],
+        )  # the user's own PATH first, nothing twice, only folders that exist
+
+
+class LabFolders(unittest.TestCase):
+    """Undeployed topologies under the lab folders the user picked."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        root = self.tmp.name
+        files = {
+            "labs/fabric/fabric.clab.yml": "name: fabric\ntopology:\n",
+            "labs/srl/two.clab.yaml": "# comment\nname: 'srl02'\n",
+            "labs/deep/a/b/c/d/e/too-deep.clab.yml": "name: deep\n",
+            "labs/.hidden/x.clab.yml": "name: hidden\n",
+            "labs/fabric/clab-fabric/ansible.clab.yml": "name: runtime\n",  # containerlab's own lab dir
+            "netlab/ospf/topology.yml": "nodes: [r1, r2]\n",
+            "netlab/running/topology.yml": "nodes: [r1]\n",
+            "notes/readme.yml": "x: 1\n",
+        }
+        for rel, text in files.items():
+            path = os.path.join(root, rel)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w") as f:
+                f.write(text)
+        self.root = root
+
+    def test_scan(self):
+        running = {
+            "managedBy": "netlab",
+            "dir": os.path.join(self.root, "netlab", "running"),
+            "topologyFile": "",
+            "nodes": [],
+        }
+        deployed = {"managedBy": "containerlab", "topologyFile": os.path.join(self.root, "labs/srl/two.clab.yaml")}
+        found = cs.scan_labs([self.root], [running, dict(deployed, dir="")])
+        self.assertEqual(
+            [(lab["name"], lab["managedBy"]) for lab in found], [("fabric", "containerlab"), ("ospf", "netlab")]
+        )
+        self.assertEqual(found[0]["actions"], ["deploy", "open", "copy"])
+        self.assertTrue(found[0]["id"].startswith("file:"))
+        only_clab = cs.scan_labs([self.root], [], {"containerlab": True, "netlab": False})
+        self.assertEqual({lab["name"] for lab in only_clab}, {"fabric", "srl02"})
+
+    def test_snapshot_lists_them(self):
+        snap = cs.take_snapshot(
+            [
+                "--clab-json", os.path.join(FIXTURES, "clab_empty.json"),
+                "--netlab-json", os.path.join(FIXTURES, "netlab_none.json"),
+                "--scan", os.path.join(self.root, "labs"),
+            ]
+        )  # fmt: skip
+        self.assertEqual([lab["name"] for lab in snap["undeployed"]], ["fabric", "srl02"])
+        self.assertIn("wireshark", snap["tools"])
+        Schema.setUpClass()
+        Schema().check(snap)
+
+    def test_deploy_plans(self):
+        owner, argv = cs.deploy_plan("/l/fab.clab.yml")
+        self.assertEqual((owner, argv), ("containerlab", ["deploy", "-t", "/l/fab.clab.yml"]))
+        owner, argv = cs.deploy_plan("/l/ospf/topology.yml", which=lambda _b: "/bin/netlab")
+        self.assertEqual(owner, "netlab")
+        self.assertEqual(argv[-3:], ["/l/ospf", "/bin/netlab", "/l/ospf/topology.yml"])
+
+
+class Capture(unittest.TestCase):
+    def test_wireshark_found(self):
+        self.assertEqual(
+            cs.wireshark_argv(lambda b: "/bin/wireshark" if b == "wireshark" else None, "linux")[1:], ["-k", "-i", "-"]
+        )
+        self.assertIsNone(cs.wireshark_argv(lambda _b: None, "linux"))
+        mac = cs.wireshark_argv(lambda _b: None, "darwin", isfile=lambda p: p.startswith("/Applications/Wireshark"))
+        self.assertTrue(mac[0].endswith("MacOS/Wireshark"))
+        win = cs.wireshark_argv(
+            lambda _b: None, "win32", isfile=lambda p: "Wireshark.exe" in p, env={"ProgramFiles": "C:\\PF"}
+        )
+        self.assertTrue(win[0].endswith("Wireshark.exe"))
+
+    def test_capture_plan(self):
+        src, _sink = cs.capture_plan("clab-fab-leaf1", "e1-1")
+        self.assertEqual(src, ["docker", "exec", "clab-fab-leaf1", "tcpdump", "-U", "-nni", "e1-1", "-w", "-"])
+        src, _sink = cs.capture_plan("clab-fab-leaf1", "e1-1", {"name": "box", "type": "ssh", "host": "me@box"})
+        self.assertIn("BatchMode=yes", src)  # no tty: the pcap stream stays binary-clean
+        self.assertEqual(src[-1], "sh -lc 'docker exec clab-fab-leaf1 tcpdump -U -nni e1-1 -w -'")
+
+
+class Ownership(unittest.TestCase):
+    def test_mine(self):
+        labs = [{"owner": "alice"}, {"owner": "bob"}, {"owner": ""}]
+        cs.set_mine(labs, "alice")
+        self.assertEqual([lab["mine"] for lab in labs], [True, False, True])
+
+
+class LabOps(unittest.TestCase):
+    def test_redeploy_and_save(self):
+        from unittest import mock
+
+        snap = snapshot("clab_mixed.json", "netlab_mixed.json")
+        stopped = next(lab for lab in snap["labs"] if lab["lifecycle"] == "stopped")
+        (dc,) = by_name(snap, "dc")
+        ran, terms, notes = [], [], []
+        with (
+            mock.patch.object(cs, "take_snapshot", lambda _a: snap),
+            mock.patch.object(cs, "in_clab_admins", lambda: True),
+            mock.patch.object(cs, "run_quietly", lambda argv, **_k: (ran.append(argv), (True, ""))[1]),
+            mock.patch.object(cs, "open_terminal", lambda argv: terms.append(argv) or True),
+            mock.patch.object(cs, "cmd_notify", notes.append),
+        ):
+            self.assertEqual(cs.cmd_lab(["redeploy", stopped["id"], stopped["fingerprint"]]), 0)
+            self.assertIn("redeploy", " ".join(terms[-1]))  # a terminal even for admins: it takes a while
+            self.assertEqual(cs.cmd_lab(["save", dc["id"], dc["fingerprint"]]), 0)
+            self.assertEqual(ran[-1][1:3], ["save", "-t"])
+            self.assertEqual(cs.cmd_lab(["redeploy", dc["id"], dc["fingerprint"]]), 3)  # running fine
+            (nl,) = by_name(snap, "nl")
+            self.assertEqual(cs.cmd_lab(["save", nl["id"], nl["fingerprint"]]), 0)
+            self.assertEqual(ran[-1][-1], "collect")  # netlab collect
+
+
 class NodeShells(unittest.TestCase):
     def test_access_per_owner_and_kind(self):
         snap = snapshot("clab_mixed.json", "netlab_mixed.json")
@@ -952,7 +1244,7 @@ class NodeShells(unittest.TestCase):
         r1 = next(n for n in nl["nodes"] if n["name"] == "r1")
         self.assertEqual(r1["access"], ["connect", "exec", "logs"])  # netlab on clab
         r2 = next(n for n in nl["nodes"] if n["name"] == "r2")
-        self.assertEqual(r2["access"], [])  # not running
+        self.assertEqual(r2["access"], ["logs"])  # stopped: its logs say why
         lab1 = next(lab for lab in by_name(snap, "lab1") if lab["lifecycle"] == "running")
         self.assertEqual(lab1["nodes"][0]["access"], ["exec", "logs"])  # linux: no sshd
 
@@ -972,6 +1264,15 @@ class NodeShells(unittest.TestCase):
         connect = cs.shell_plan("connect", "frr", "c", node="r1", lab_dir="/l", env=env, which=lambda _b: "/bin/netlab")
         self.assertEqual(connect[-3:], ["/l", "/bin/netlab", "r1"])
         self.assertIsNone(cs.shell_plan("nope", "x", "c", env=env))
+        telnet = cs.shell_plan("telnet", "nokia_sros", "clab-x-sr1", env=env)
+        self.assertEqual(telnet, ["docker", "exec", "-it", "clab-x-sr1", "telnet", "127.0.0.1", "5000"])
+
+    def test_telnet_for_vm_kinds(self):
+        lab = {"managedBy": "containerlab", "dir": "/l"}
+        vm = {"running": True, "kind": "juniper_vmx", "container": "c", "image": "vrnetlab/vr-vmx"}
+        self.assertIn("telnet", cs.node_access(lab, vm))
+        self.assertNotIn("telnet", cs.node_access(lab, dict(vm, kind="nokia_srlinux", image="srlinux")))
+        self.assertIn("telnet", cs.node_access(lab, dict(vm, kind="linux", image="ghcr.io/x/vrnetlab/foo")))
 
     def test_env_overrides(self):
         env = {"CLAB_WIDGET_EXEC_ARISTA_CEOS": "Cli", "CLAB_WIDGET_SSH_USER_FRR": "vagrant"}

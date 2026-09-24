@@ -31,6 +31,7 @@ SHOTS = [
     ("search-down", "list", "-", "down"),
     ("settings", "settings-look", "-", None),
     ("hosts", "hosts", "-", None),
+    ("info", "settings-info", "-", None),
 ]
 
 
@@ -47,7 +48,20 @@ def snapshot(tmp):
         env[key] = value
     env["XDG_CONFIG_HOME"] = os.path.join(tmp, "config")  # no real remote hosts
     out = subprocess.run(
-        [sys.executable, TOOL, "snapshot", "--details"], capture_output=True, text=True, check=True, env=env
+        [
+            sys.executable,
+            TOOL,
+            "snapshot",
+            "--details",
+            "--scan",
+            os.path.join(tmp, "demo", "labs"),
+            "--scan",
+            os.path.join(tmp, "demo", "netlab"),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+        env=env,
     )
     snap = json.loads(out.stdout)
     # A clabernetes lab on a k3s cluster, from the saved kubectl output.

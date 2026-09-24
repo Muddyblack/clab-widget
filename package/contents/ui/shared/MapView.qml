@@ -3,7 +3,8 @@ import "../../code/Labs.js" as Labs
 
 // Topology map page: pan (drag), zoom (wheel around the cursor, pinch, or the
 // host's buttons via zoomBy()/fit()), hover highlights a node's links, click /
-// right-click a node for its menu.
+// right-click a node for its menu. Hover a link for its ends, state and
+// throughput (`rates`, from the host); right-click it to copy or capture.
 //
 // Built for 700+ nodes: above DENSE nodes are painted straight onto a canvas
 // (no item per node), links live on one static canvas that only repaints when
@@ -14,7 +15,10 @@ Item {
     property var theme
     property var lab
     property Item menuAnchor
+    // {linkKey: {rx, tx, end}} bit/s, from Labs.linkRates().
+    property var rates: ({})
     signal nodeMenu(var node, real x, real y)
+    signal linkMenu(var link, real x, real y)
 
     // Lab nodes + endpoints outside the lab (host / macvlan / mgmt-net).
     readonly property var graph: Labs.mapGraph(lab)
@@ -43,6 +47,8 @@ Item {
     readonly property real minZoom: Math.min(1, fitZoom)
     property real zoom: 1
     property string hovered: ""
+    property int hoveredLink: -1
+    property point hoverAt: Qt.point(0, 0)
     readonly property bool showLabels: geo.spacing * zoom >= 56
     // Dense maps get small tiles (about half the gap between neighbours).
     readonly property real nodeSize: isDense ? Math.max(4, Math.min(24, geo.spacing * zoom * 0.5)) : Math.max(5, Math.min(30, geo.size * zoom))
@@ -91,7 +97,28 @@ Item {
         return best;
     }
 
+    // Link under (x, y) in stage coordinates, or -1 (within ~5 px of its line).
+    function linkAt(x, y) {
+        var ls = graph.links, pos = geo.pos, best = -1, bestD = 5;
+        for (var i = 0; i < ls.length; i++) {
+            var a = pos[ls[i].a], b = pos[ls[i].z];
+            if (!a || !b)
+                continue;
+            var ax = a.x * zoom, ay = a.y * zoom, bx = b.x * zoom, by = b.y * zoom;
+            var dx = bx - ax, dy = by - ay, len2 = dx * dx + dy * dy;
+            var t = len2 > 0 ? Math.max(0, Math.min(1, ((x - ax) * dx + (y - ay) * dy) / len2)) : 0;
+            var d = Math.hypot(x - (ax + t * dx), y - (ay + t * dy));
+            if (d < bestD) {
+                bestD = d;
+                best = i;
+            }
+        }
+        return best;
+    }
+
     onGeoChanged: base.requestPaint()
+    onRatesChanged: base.requestPaint()
+    onHoveredLinkChanged: overlay.requestPaint()
     onZoomChanged: base.requestPaint()
     onHoveredChanged: overlay.requestPaint()
     onLabChanged: {
@@ -165,6 +192,19 @@ Item {
                         ctx.strokeStyle = view.theme.ok;
                         ctx.globalAlpha = many ? 0.3 : 0.7;
                         stroke(up);
+                        // Live traffic: busier up-links drawn thicker (log scale).
+                        for (i = 0; i < ls.length; i++) {
+                            var r = view.rates[ls[i].key || Labs.linkKey(ls[i])];
+                            var pa = pos[ls[i].a], pb = pos[ls[i].z];
+                            if (!r || ls[i].up !== true || r.rx + r.tx <= 1000 || !pa || !pb)
+                                continue;
+                            ctx.lineWidth = Math.min(6, 1 + Math.log((r.rx + r.tx) / 1000) / Math.LN10);
+                            ctx.beginPath();
+                            ctx.moveTo(pa.x * z, pa.y * z);
+                            ctx.lineTo(pb.x * z, pb.y * z);
+                            ctx.stroke();
+                        }
+                        ctx.lineWidth = many ? Math.max(0.5, 0.8 * Math.min(z, 2)) : 1.5;
                         // Down links (or touching a down node): dashed red, on top.
                         ctx.globalAlpha = 0.85;
                         ctx.strokeStyle = view.theme.bad;
@@ -209,9 +249,19 @@ Item {
                     onPaint: {
                         var ctx = getContext("2d");
                         ctx.reset();
-                        if (view.hovered === "")
-                            return;
                         var z = view.zoom, pos = view.geo.pos, ls = view.graph.links, h = view.hovered;
+                        var hl = view.hoveredLink >= 0 ? ls[view.hoveredLink] : null;
+                        if (hl && pos[hl.a] && pos[hl.z]) {
+                            ctx.strokeStyle = view.theme.text;
+                            ctx.globalAlpha = 0.95;
+                            ctx.lineWidth = 3;
+                            ctx.beginPath();
+                            ctx.moveTo(pos[hl.a].x * z, pos[hl.a].y * z);
+                            ctx.lineTo(pos[hl.z].x * z, pos[hl.z].y * z);
+                            ctx.stroke();
+                        }
+                        if (h === "")
+                            return;
                         ctx.strokeStyle = view.theme.text;
                         ctx.globalAlpha = 0.9;
                         ctx.lineWidth = 1.6;
@@ -284,6 +334,28 @@ Item {
                     }
                 }
 
+                // The hovered link: its ends, state and throughput.
+                Rectangle {
+                    readonly property var link: view.hoveredLink >= 0 ? view.graph.links[view.hoveredLink] : null
+                    visible: link !== null && link !== undefined && view.hovered === ""
+                    x: Math.max(0, Math.min(view.hoverAt.x + 12, stage.width - width - 4))
+                    y: Math.max(0, view.hoverAt.y - height - 8)
+                    width: linkText.implicitWidth + 12
+                    height: linkText.implicitHeight + 6
+                    radius: 4
+                    color: view.theme.cardSolid
+                    border.width: 1
+                    border.color: link && link.up === false ? view.theme.bad : view.theme.border
+
+                    Text {
+                        id: linkText
+                        anchors.centerIn: parent
+                        text: parent.link ? Labs.linkText(parent.link, view.rates[parent.link.key || Labs.linkKey(parent.link)]) : ""
+                        color: view.theme.text
+                        font.pixelSize: view.theme.smallSize
+                    }
+                }
+
                 // Name of the hovered node when labels are hidden (dense or zoomed out).
                 Rectangle {
                     readonly property var p: view.hovered !== "" ? view.geo.pos[view.hovered] : null
@@ -311,19 +383,31 @@ Item {
             }
 
             HoverHandler {
-                onPointChanged: view.hovered = view.nodeAt(point.position.x - stage.x, point.position.y - stage.y)
-                onHoveredChanged: if (!hovered)
-                    view.hovered = ""
+                onPointChanged: {
+                    var x = point.position.x - stage.x, y = point.position.y - stage.y;
+                    view.hovered = view.nodeAt(x, y);
+                    view.hoverAt = Qt.point(x, y);
+                    view.hoveredLink = view.hovered === "" ? view.linkAt(x, y) : -1;
+                }
+                onHoveredChanged: if (!hovered) {
+                    view.hovered = "";
+                    view.hoveredLink = -1;
+                }
             }
 
             TapHandler {
                 acceptedButtons: Qt.LeftButton | Qt.RightButton
                 onTapped: (ev, button) => {
-                    var name = view.nodeAt(ev.position.x - stage.x, ev.position.y - stage.y);
-                    if (name === "" || view.byName[name].external)
-                        return;
+                    var x = ev.position.x - stage.x, y = ev.position.y - stage.y;
+                    var name = view.nodeAt(x, y);
                     var g = content.mapToItem(view.menuAnchor, ev.position.x, ev.position.y);
-                    view.nodeMenu(view.byName[name], g.x, g.y);
+                    if (name !== "" && !view.byName[name].external) {
+                        view.nodeMenu(view.byName[name], g.x, g.y);
+                        return;
+                    }
+                    var li = name === "" ? view.linkAt(x, y) : -1;
+                    if (li >= 0)
+                        view.linkMenu(view.graph.links[li], g.x, g.y);
                 }
             }
         }

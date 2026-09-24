@@ -48,7 +48,8 @@
           containerlab = pkgs.callPackage ./nix/containerlab.nix { };
         });
 
-      # programs.clab-widget: widget + netlab + setuid containerlab for clab_admins.
+      # programs.clab-widget: the widget, using the installed containerlab / netlab;
+      # containerlab.enable / netlab.enable install them (setuid for clab_admins).
       nixosModules.default = import ./nix/nixos-module.nix self;
 
       apps = forAllSystems (system:

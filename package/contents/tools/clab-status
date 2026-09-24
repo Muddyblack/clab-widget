@@ -22,6 +22,13 @@
                                        add an ssh / netlab-ui host (prints {"ok", "message"})
     clab-status login <name> <url> <user> --terminal
                                        the password prompt in a terminal window
+    clab-status node <start|stop|restart> <labId> <node> <fingerprint>
+                                       one node, via containerlab (links kept)
+    clab-status lab <redeploy|save> <labId> <fingerprint>
+    clab-status deploy <topology file> deploy an undeployed lab (terminal)
+    clab-status capture <container> <iface> [--via CONN]
+                                       live capture of one interface in Wireshark
+    snapshot … --scan DIR              also list undeployed topologies under DIR
     clab-status stop <labId> <fingerprint>
                                        tear a lab down via its owner (re-checked)
 
@@ -51,6 +58,39 @@ from datetime import datetime, timezone
 
 SCHEMA_VERSION = 1
 COMMAND_TIMEOUT = 20
+
+# Use the containerlab / netlab already on this machine, wherever it is: a
+# desktop shell (plasmashell, a systemd user session) often has a shorter PATH
+# than a login shell. These places are appended, so the user's own PATH wins;
+# /run/wrappers/bin first, for NixOS's setuid containerlab.
+TOOL_DIRS = (
+    "/run/wrappers/bin",
+    "/etc/profiles/per-user/{user}/bin",
+    "{home}/.nix-profile/bin",
+    "/run/current-system/sw/bin",
+    "/nix/var/nix/profiles/default/bin",
+    "{home}/.local/bin",
+    "/usr/local/bin",
+    "/usr/local/sbin",
+    "/opt/homebrew/bin",
+    "/snap/bin",
+)
+
+
+def extend_path(env=None, isdir=os.path.isdir):
+    env = os.environ if env is None else env
+    parts = [p for p in env.get("PATH", "").split(os.pathsep) if p]
+    user = env.get("USER") or env.get("LOGNAME") or ""
+    home = os.path.expanduser("~")
+    for d in TOOL_DIRS:
+        d = d.format(user=user, home=home)
+        if "{" not in d and d not in parts and isdir(d):
+            parts.append(d)
+    env["PATH"] = os.pathsep.join(parts)
+
+
+if os.name == "posix":
+    extend_path()
 
 # containerlab states that count as "up". Anything else (exited, created,
 # paused, dead, restarting) is a node that should be running but is not.
@@ -190,6 +230,7 @@ def normalize_clab(data):
             {
                 "name": c.get("nodeName") or short_node_name(container, name),
                 "container": container,
+                "containerId": str(c.get("container_id") or "")[:12],
                 "kind": c.get("kind", ""),
                 "image": c.get("image", ""),
                 "group": c.get("group", ""),
@@ -454,6 +495,7 @@ def fetch_remote(conn, tokens):
         lab["apiUrl"] = conn["url"]
         # Paths are on the remote machine: nothing to open or read locally.
         lab["remote"] = True
+        lab["mine"] = not lab.get("owner") or lab["owner"] == conn.get("username")
     return labs, None
 
 
@@ -1196,25 +1238,60 @@ def docker_memory():
 
 LINK_UP_STATES = {"up", "unknown"}  # "unknown": tun/dummy-style ifaces that are up
 LINK_STATE_MAX_NODES = 200
-IFACE_SCRIPT = 'for i in /sys/class/net/*; do printf "%s %s\\n" "${i##*/}" "$(cat "$i/operstate" 2>/dev/null)"; done'
+# One `sh` per node reads everything the popup shows about it: each
+# interface's operstate and byte counters (link state, throughput), the
+# management MAC, whether tcpdump is there (link capture) and the listening
+# TCP ports (web UI).
+PROBE_SCRIPT = (
+    'for i in /sys/class/net/*; do n=${i##*/}; printf "if %s %s %s %s\\n" "$n" '
+    '"$(cat "$i/operstate" 2>/dev/null)" "$(cat "$i/statistics/rx_bytes" 2>/dev/null)" '
+    '"$(cat "$i/statistics/tx_bytes" 2>/dev/null)"; done; '
+    'printf "mac %s\\n" "$(cat /sys/class/net/eth0/address 2>/dev/null)"; '
+    "command -v tcpdump >/dev/null 2>&1 && echo tcpdump; "
+    "echo tcp; cat /proc/net/tcp /proc/net/tcp6 2>/dev/null"
+)
+# Listening ports worth an "open in browser" (https for the TLS ones).
+WEB_PORTS = {80: "http", 443: "https", 3000: "http", 8000: "http", 8080: "http", 8443: "https", 9090: "http"}
 
 
-def parse_operstates(text):
-    """`name operstate` lines → {iface: operstate}."""
-    out = {}
-    for line in (text or "").splitlines():
+def parse_probe(text):
+    """PROBE_SCRIPT output → {"ifaces", "counters", "mac", "tcpdump", "ports"}."""
+    probe = {"ifaces": {}, "counters": {}, "mac": "", "tcpdump": False, "ports": []}
+    lines = (text or "").splitlines()
+    ports = set()
+    in_tcp = False
+    for line in lines:
         parts = line.split()
-        if len(parts) == 2:
-            out[parts[0]] = parts[1]
-    return out
+        if in_tcp:
+            # sl local_address rem_address st …; st 0A = LISTEN
+            if len(parts) > 3 and parts[3] == "0A" and ":" in parts[1]:
+                try:
+                    ports.add(int(parts[1].rsplit(":", 1)[1], 16))
+                except ValueError:
+                    pass
+            continue
+        if not parts:
+            continue
+        if parts[0] == "if" and len(parts) >= 3:
+            probe["ifaces"][parts[1]] = parts[2]
+            if len(parts) >= 5 and parts[3].isdigit() and parts[4].isdigit():
+                probe["counters"][parts[1]] = [int(parts[3]), int(parts[4])]
+        elif parts[0] == "mac" and len(parts) == 2:
+            probe["mac"] = parts[1]
+        elif parts[0] == "tcpdump":
+            probe["tcpdump"] = True
+        elif parts[0] == "tcp":
+            in_tcp = True
+    probe["ports"] = sorted(ports)
+    return probe
 
 
-def docker_ifaces(container):
-    """{iface: operstate} inside a container, or None if it can't be read
-    (no sh in the image, docker unreachable)."""
+def docker_probe(container):
+    """parse_probe() of one container, or None if it can't be read (no sh in
+    the image, docker unreachable)."""
     try:
         proc = subprocess.run(
-            ["docker", "exec", container, "sh", "-c", IFACE_SCRIPT],
+            ["docker", "exec", container, "sh", "-c", PROBE_SCRIPT],
             capture_output=True,
             text=True,
             timeout=3,
@@ -1222,31 +1299,45 @@ def docker_ifaces(container):
         )
     except (OSError, subprocess.TimeoutExpired):
         return None
-    return parse_operstates(proc.stdout) if proc.returncode == 0 else None
+    return parse_probe(proc.stdout) if proc.returncode == 0 else None
+
+
+def as_probe(value):
+    """A fetcher may answer a probe or (saved demo data) a bare {iface: state}."""
+    if not isinstance(value, dict):
+        return None
+    return value if "ifaces" in value else {"ifaces": value, "counters": {}, "mac": "", "tcpdump": False, "ports": []}
 
 
 def add_link_state(labs, fetch_ifaces):
-    """Set link["up"] on containerlab links whose node ends could all be read.
-    Ends outside the lab (host, macvlan, mgmt-net) don't count; a stopped
-    node's end is down."""
+    """Probe every running container node (while the popup is open) and set:
+    link["up"] where both node ends could be read (ends outside the lab —
+    host, macvlan, mgmt-net — don't count; a stopped node's end is down),
+    link["bytes"] (end a's rx/tx, for throughput), node["mac"],
+    node["capture"] (tcpdump present) and node["webPorts"]."""
     wanted = {}
     for lab in labs:
         if lab["managedBy"] != "containerlab" and "containerlab" not in lab.get("providers", []):
             continue
-        if not lab.get("links"):
-            continue
         for n in lab["nodes"]:
-            if n.get("running") and n.get("container"):
+            if n.get("running") and n.get("container") and n.get("provider", "containerlab") == "containerlab":
                 wanted[n["container"]] = None
     if not wanted or len(wanted) > LINK_STATE_MAX_NODES:
         return
     from concurrent.futures import ThreadPoolExecutor
 
     with ThreadPoolExecutor(max_workers=min(8, len(wanted))) as pool:
-        for container, states in zip(wanted, pool.map(fetch_ifaces, wanted), strict=True):
-            wanted[container] = states
+        for container, probe in zip(wanted, pool.map(fetch_ifaces, wanted), strict=True):
+            wanted[container] = as_probe(probe)
     for lab in labs:
         nodes = {n["name"]: n for n in lab["nodes"]}
+        for n in lab["nodes"]:
+            probe = wanted.get(n.get("container"))
+            if probe:
+                if probe["mac"]:
+                    n["mac"] = probe["mac"]
+                n["capture"] = probe["tcpdump"]
+                n["webPorts"] = [p for p in probe["ports"] if p in WEB_PORTS]
         for link in lab.get("links") or []:
             ends = []
             for name, iface in ((link["a"], link.get("aIf", "")), (link["z"], link.get("zIf", ""))):
@@ -1256,11 +1347,15 @@ def add_link_state(labs, fetch_ifaces):
                 if not node.get("running"):
                     ends.append(False)
                     continue
-                states = wanted.get(node.get("container"))
-                if states is None or iface not in states:
+                probe = wanted.get(node.get("container"))
+                if probe is None or iface not in probe["ifaces"]:
                     ends.append(None)
                 else:
-                    ends.append(states[iface] in LINK_UP_STATES)
+                    ends.append(probe["ifaces"][iface] in LINK_UP_STATES)
+                    counters = probe["counters"].get(iface)
+                    if counters and "bytes" not in link:
+                        # From this end's side: rx = towards it, tx = away.
+                        link["bytes"] = {"end": name, "rx": counters[0], "tx": counters[1]}
             if ends and None not in ends:
                 link["up"] = all(ends)
 
@@ -1422,6 +1517,8 @@ def finish(lab):
     lab["actions"] = lab_actions(lab)
     for node in lab["nodes"]:
         node["access"] = node_access(lab, node)
+        node["ops"] = node_ops(lab, node)
+    lab.setdefault("mine", True)  # ssh hosts decided it there; k8s, netlab-ui: no owner
     return lab
 
 
@@ -1433,9 +1530,12 @@ def node_access(lab, node):
     if lab.get("via") == "k8s":
         # kubectl exec / logs on the node's Deployment; logs help most when it's down.
         return (["exec"] if node.get("running") else []) + ["logs"]
-    if (lab.get("remote") and lab.get("via") not in HOST_TYPES) or not node.get("running"):
+    if lab.get("remote") and lab.get("via") not in HOST_TYPES:
         return []
     container_node = node.get("provider", "containerlab") == "containerlab"
+    if not node.get("running"):
+        # A stopped container still has its logs: usually why it stopped.
+        return ["logs"] if container_node and node.get("container") else []
     out = []
     if lab["managedBy"] == "netlab" and lab.get("dir"):
         out.append("connect")
@@ -1443,7 +1543,44 @@ def node_access(lab, node):
         out.append("ssh")
     if container_node and node.get("container"):
         out += ["exec", "logs"]
+        if is_vm_kind(node):
+            out.append("telnet")
     return out
+
+
+# VM-based kinds (vrnetlab: a VM inside the container) have a serial console
+# on telnet 127.0.0.1:5000 inside the container, like the VS Code extension's
+# "Connect (Telnet)". $CLAB_WIDGET_TELNET_PORT overrides the port.
+VM_KINDS = {
+    "nokia_sros", "nokia_srsim", "juniper_vmx", "juniper_vqfx", "juniper_vsrx", "juniper_vjunosrouter",
+    "juniper_vjunosswitch", "juniper_vjunosevolved", "juniper_vjunos_router", "juniper_vjunos_switch",
+    "cisco_xrv", "cisco_xrv9k", "cisco_csr1000v", "cisco_c8000v", "cisco_cat9kv", "cisco_n9kv", "cisco_nxos",
+    "cisco_ftdv", "cisco_asav", "cisco_iol", "cisco_vios", "arista_veos", "fortinet_fortigate", "paloalto_panos",
+    "mikrotik_ros", "huawei_vrp", "ipinfusion_ocnos", "openbsd", "freebsd", "generic_vm", "dell_sonic",
+    "dell_ftosv", "checkpoint_cloudguard", "aruba_aoscx", "sonic-vm", "6wind_vsr",
+}  # fmt: skip
+
+
+def is_vm_kind(node):
+    kind = node.get("kind", "")
+    return kind in VM_KINDS or kind.startswith("vr-") or "vrnetlab" in node.get("image", "")
+
+
+def node_ops(lab, node):
+    """Lifecycle ops on one node. containerlab's own `start|stop|restart --node`
+    (0.75+) park and restore the node's veth links; a plain `docker stop`
+    would drop them. clabernetes: deleting the pod restarts the node."""
+    if lab.get("via") == "k8s":
+        return ["restart"] if node.get("container") else []
+    if lab.get("remote") and lab.get("via") not in HOST_TYPES:
+        return []
+    if (
+        not lab.get("topologyFile")
+        or node.get("provider", "containerlab") != "containerlab"
+        or not node.get("container")
+    ):
+        return []
+    return ["restart", "stop"] if node.get("running") else ["start"]
 
 
 def fingerprint(lab):
@@ -1473,7 +1610,7 @@ def lab_actions(lab, which=shutil.which):
         if (lab["managedBy"] == "containerlab" and lab.get("topologyFile")) or (
             lab["managedBy"] == "netlab" and lab.get("dir")
         ):
-            acts.append("stop")
+            acts += ["stop", *cleanup_actions(lab), *repair_actions(lab)]
         return acts
     if lab.get("remote"):
         if lab.get("uiUrl") or (lab["managedBy"] == "containerlab" and any(which(b) for b in CLAB_DESKTOP_BINS)):
@@ -1490,8 +1627,42 @@ def lab_actions(lab, which=shutil.which):
     if (lab["managedBy"] == "containerlab" and lab.get("topologyFile")) or (
         lab["managedBy"] == "netlab" and lab.get("dir")
     ):
-        acts.append("stop")
+        acts += ["stop", *cleanup_actions(lab), *repair_actions(lab)]
     return acts
+
+
+def cleanup_actions(lab):
+    """Stop and delete the generated files; force-clean a lab that looks broken."""
+    return ["clean"] + (["force"] if lab["lifecycle"] in ("partial", "stopped", "unknown") else [])
+
+
+def repair_actions(lab):
+    """Redeploy a lab that is partly or fully down; save the running configs.
+    containerlab: `redeploy` / `save` (root, like destroy); netlab:
+    `netlab restart` / `netlab collect` in its directory."""
+    out = []
+    if lab["lifecycle"] in ("partial", "stopped"):
+        out.append("redeploy")
+    if lab["running"] > 0:
+        out.append("save")
+    return out
+
+
+def current_user():
+    import getpass
+
+    try:
+        return getpass.getuser()
+    except (KeyError, OSError, ImportError):
+        return os.environ.get("USER") or os.environ.get("USERNAME") or ""
+
+
+def set_mine(labs, user):
+    """lab["mine"]: false only for a lab someone else deployed ("Hide labs I
+    don't own" on shared lab servers). An unknown owner counts as mine."""
+    for lab in labs:
+        if "mine" not in lab:
+            lab["mine"] = not lab.get("owner") or lab["owner"] == user
 
 
 def build_snapshot(clab_data, clab_error, netlab_data, netlab_error, enabled, details=None, remotes=()):
@@ -1513,6 +1684,7 @@ def build_snapshot(clab_data, clab_error, netlab_data, netlab_error, enabled, de
         sources[f"remote:{name}"] = source_state(rerr)
         labs.extend(rlabs)
 
+    set_mine([lab for lab in labs if not lab.get("remote")], current_user())
     # Topology first: the details pass colours its links.
     for lab in labs:
         enrich_topology(lab)
@@ -1575,13 +1747,236 @@ def take_snapshot(args):
             fetch_ifaces = saved_ifaces.get if isinstance(saved_ifaces, dict) else None
             details = lambda labs: add_details(labs, dict, lambda _i: None, fetch_ifaces)  # noqa: E731
         else:
-            details = lambda labs: add_details(labs, docker_memory, fetch_netlab_detail, docker_ifaces)  # noqa: E731
+            details = lambda labs: add_details(labs, docker_memory, fetch_netlab_detail, docker_probe)  # noqa: E731
 
     remotes = []
     if "--no-remote" not in args and not (clab_file or netlab_file):
         remotes = collect_remotes(load_connections(), load_tokens(), details="--details" in args)
 
-    return build_snapshot(clab_data, clab_error, netlab_data, netlab_error, enabled, details, remotes)
+    snap = build_snapshot(clab_data, clab_error, netlab_data, netlab_error, enabled, details, remotes)
+    folders = [args[i + 1] for i, a in enumerate(args[:-1]) if a == "--scan"]
+    if folders:
+        snap["undeployed"] = scan_labs(folders, snap["labs"], enabled)
+    snap["tools"] = {"wireshark": bool(wireshark_argv())}
+    # Saved demo output ($CLAB_WIDGET_VERSIONS_JSON: {tool: version text}).
+    saved, _err = read_json_file(os.environ.get("CLAB_WIDGET_VERSIONS_JSON", ""))
+    if isinstance(saved, dict):
+        fake = {t: f"/usr/bin/{t}" for t in saved}
+        snap["tools"].update(tool_versions(fake.get, lambda argv: saved[os.path.basename(argv[0])], os.devnull))
+    else:
+        snap["tools"].update(tool_versions())
+    return snap
+
+
+# ── Lab folders (undeployed labs) ───────────────────────────────────────────────
+#
+# Like the containerlab app's lab list: topologies under the folders the user
+# picked that aren't deployed right now, with Deploy. containerlab: *.clab.yml;
+# netlab: topology.yml (its default name) outside netlab's own work folders.
+
+SCAN_DEPTH = 4
+SCAN_LIMIT = 200
+SCAN_SKIP = {"node_modules", "__pycache__", "venv", ".venv"}
+
+
+def topology_name(path):
+    """containerlab's top-level `name:` (no YAML parser needed for that)."""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                m = re.match(r"name:\s*['\"]?([\w.-]+)", line)
+                if m:
+                    return m.group(1)
+    except OSError:
+        pass
+    return re.sub(r"\.clab\.ya?ml$", "", os.path.basename(path))
+
+
+def scan_labs(folders, labs, enabled=None, walk=os.walk):
+    """Topologies under `folders` that no deployed lab comes from."""
+    enabled = enabled or {"containerlab": True, "netlab": True}
+    deployed = {
+        realdir(lab.get("topologyFile", "")) for lab in labs if lab.get("topologyFile") and not lab.get("remote")
+    }
+    deployed |= {
+        realdir(lab["dir"]) for lab in labs if lab["managedBy"] == "netlab" and lab.get("dir") and not lab.get("remote")
+    }
+    found, seen = [], set()
+    for folder in folders:
+        root = os.path.expanduser(folder)
+        base_depth = root.rstrip(os.sep).count(os.sep)
+        for dirpath, dirnames, filenames in walk(root):
+            # Hidden folders, containerlab's clab-<lab> runtime dirs, deps.
+            dirnames[:] = sorted(d for d in dirnames if not d.startswith((".", "clab-")) and d not in SCAN_SKIP)
+            if dirpath.count(os.sep) - base_depth >= SCAN_DEPTH:
+                dirnames[:] = []
+            for name in sorted(filenames):
+                path = os.path.join(dirpath, name)
+                if enabled.get("containerlab") and re.search(r"\.clab\.ya?ml$", name):
+                    owner, label = "containerlab", topology_name(path)
+                elif enabled.get("netlab") and name in ("topology.yml", "topology.yaml"):
+                    owner, label = "netlab", os.path.basename(dirpath.rstrip(os.sep)) or "netlab lab"
+                else:
+                    continue
+                key = realdir(path)
+                if key in seen or key in deployed or (owner == "netlab" and realdir(dirpath) in deployed):
+                    continue
+                seen.add(key)
+                found.append(
+                    {
+                        "id": "file:" + path,
+                        "name": label,
+                        "managedBy": owner,
+                        "topologyFile": path,
+                        "dir": dirpath,
+                        "actions": ["deploy", "open", "copy"],
+                    }
+                )
+                if len(found) >= SCAN_LIMIT:
+                    return found
+    return sorted(found, key=lambda lab: (lab["name"].lower(), lab["topologyFile"]))
+
+
+def deploy_plan(path, which=shutil.which):
+    """How to deploy an undeployed topology: containerlab `deploy -t` (root),
+    or `netlab up` in its folder."""
+    if re.search(r"\.clab\.ya?ml$", path):
+        return "containerlab", ["deploy", "-t", path]
+    netlab = which("netlab") or "netlab"
+    return "netlab", ["sh", "-c", 'cd "$1" && exec "$2" up "$3"', "sh", os.path.dirname(path), netlab, path]
+
+
+def cmd_deploy(args):
+    """deploy <topology file>: in a terminal (deploys take a while and may ask
+    for sudo)."""
+    if not args or not os.path.isfile(args[0]):
+        cmd_notify(["Not deployed", f"{args[0] if args else '?'}: file not found"])
+        return 1
+    owner, argv = deploy_plan(os.path.abspath(args[0]))
+    if owner == "containerlab":
+        argv, _terminal = clab_plan(argv)
+    return 0 if open_terminal(hold_open(argv)) else 1
+
+
+# ── Link capture (Wireshark) ────────────────────────────────────────────────────
+#
+# `docker exec <node> tcpdump -U -w - -i <iface> | wireshark -k -i -`, as the
+# VS Code extension's plain (non-Edgeshark) capture. The node needs tcpdump
+# (node["capture"], probed); on an ssh / WSL host the tcpdump side runs there.
+
+
+# Oldest releases the widget works with: containerlab 0.75 brought node
+# start/stop/restart (and netlab 26 needs it), netlab 26.2 `status --format json`.
+MIN_VERSIONS = {"containerlab": "0.75.0", "netlab": "26.2"}
+VERSION_CMDS = {"containerlab": ["containerlab", "version"], "netlab": ["netlab", "version"]}
+
+
+def parse_version(text):
+    """First x.y[.z] in the output, preferring a `version:` line (containerlab
+    prints a banner first)."""
+    m = re.search(r"version:?\s*v?(\d+\.\d+(?:\.\d+)?)", text or "", re.I) or re.search(
+        r"(\d+\.\d+(?:\.\d+)?)", text or ""
+    )
+    return m.group(1) if m else None
+
+
+def version_tuple(v):
+    return tuple(int(x) for x in re.findall(r"\d+", v or "")[:3])
+
+
+def version_info(tool, path, output):
+    """{path, version, min, ok}: ok is False when missing or too old."""
+    version = parse_version(output) if path else None
+    low = MIN_VERSIONS[tool]
+    return {
+        "path": path,
+        "version": version,
+        "min": low,
+        "ok": bool(version) and version_tuple(version) >= version_tuple(low),
+    }
+
+
+def tool_versions(which=shutil.which, run=None, cache_file=None):
+    """Installed containerlab / netlab versions, cached by binary path + mtime
+    so a refresh doesn't start two more processes every time."""
+    cache_file = cache_file or os.path.join(state_dir(), "versions.json")
+    cache, _err = read_json_file(cache_file)
+    cache = cache if isinstance(cache, dict) else {}
+    out, changed = {}, False
+    for tool, argv in VERSION_CMDS.items():
+        path = which(argv[0])
+        try:
+            key = f"{path}:{os.stat(path).st_mtime}" if path else ""
+        except OSError:
+            key = str(path)
+        entry = cache.get(tool)
+        if not path:
+            text = ""
+        elif isinstance(entry, dict) and entry.get("key") == key:
+            text = entry.get("output", "")
+        else:
+            text = (run or version_output)([path, *argv[1:]])
+            cache[tool], changed = {"key": key, "output": text}, True
+        out[tool] = version_info(tool, path, text)
+    if changed:
+        try:
+            os.makedirs(os.path.dirname(cache_file), exist_ok=True)
+            with open(cache_file, "w") as f:
+                json.dump(cache, f)
+        except OSError:
+            pass
+    return out
+
+
+def version_output(argv):
+    try:
+        proc = subprocess.run(argv, capture_output=True, text=True, timeout=10, stdin=subprocess.DEVNULL)
+        return proc.stdout + proc.stderr
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+
+
+def wireshark_argv(which=shutil.which, platform=sys.platform, isfile=os.path.isfile, env=None):
+    env = os.environ if env is None else env
+    exe = which("wireshark") or which("Wireshark")
+    if not exe and platform == "darwin" and isfile("/Applications/Wireshark.app/Contents/MacOS/Wireshark"):
+        exe = "/Applications/Wireshark.app/Contents/MacOS/Wireshark"
+    if not exe and platform == "win32":
+        for base in (env.get("ProgramFiles"), env.get("ProgramFiles(x86)")):
+            if base and isfile(os.path.join(base, "Wireshark", "Wireshark.exe")):
+                exe = os.path.join(base, "Wireshark", "Wireshark.exe")
+                break
+    return [exe, "-k", "-i", "-"] if exe else None
+
+
+def capture_plan(container, iface, conn=None):
+    """(tcpdump side argv, wireshark argv)."""
+    tcpdump = ["docker", "exec", container, "tcpdump", "-U", "-nni", iface, "-w", "-"]
+    if conn is not None:
+        tcpdump = host_argv(conn, shlex.join(tcpdump))
+    return tcpdump, wireshark_argv()
+
+
+def cmd_capture(args):
+    """capture <container> <iface> [--via CONN]: live capture into Wireshark."""
+    via = flag_value(args, "--via")
+    pos = [a for i, a in enumerate(args) if a != "--via" and (i == 0 or args[i - 1] != "--via")]
+    if len(pos) < 2:
+        return usage()
+    conn = find_connection(via) if via else None
+    if via and conn is None:
+        return 1
+    src, sink = capture_plan(pos[0], pos[1], conn)
+    if sink is None:
+        cmd_notify(["No capture", "Wireshark isn't installed"])
+        return 1
+    posix = {"start_new_session": True} if os.name == "posix" else {"creationflags": 0x08000000}
+    producer = subprocess.Popen(
+        src, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, **posix
+    )
+    subprocess.Popen(sink, stdin=producer.stdout, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **posix)
+    producer.stdout.close()  # Wireshark holds the pipe now; closing it ends tcpdump too
+    return 0
 
 
 def cmd_snapshot(args):
@@ -1839,6 +2234,9 @@ def shell_plan(mode, kind, container, node="", lab_dir="", env=None, which=shuti
         return ["docker", "exec", "-it", container, "sh", "-c", "command -v bash >/dev/null && exec bash || exec sh"]
     if mode == "logs":
         return ["docker", "logs", "-f", "--tail", "200", container]
+    if mode == "telnet":
+        port = env.get("CLAB_WIDGET_TELNET_PORT") or "5000"
+        return ["docker", "exec", "-it", container, "telnet", "127.0.0.1", port]
     return None
 
 
@@ -1871,22 +2269,133 @@ def cmd_shell(args):
     return 0
 
 
-def stop_plan(lab, which=shutil.which, in_admin_group=None):
-    """How to stop a local lab: argv to run in a terminal, via its owner.
-
-    containerlab needs root (or clab_admins membership); sudo resets PATH on
-    NixOS and most distros, so the binary goes by absolute path."""
-    if lab["managedBy"] == "netlab":
-        netlab = which("netlab") or "netlab"
-        return ["sh", "-c", 'cd "$1" && "$2" down', "sh", lab["dir"], netlab], lab["dir"]
-    clab = which("containerlab") or "containerlab"
-    if in_admin_group is None:
-        in_admin_group = getattr(os, "geteuid", lambda: -1)() == 0 or "clab_admins" in group_names()
-    cmd = [clab, "destroy", "-t", lab["topologyFile"]]
-    return (cmd if in_admin_group else ["sudo", *cmd]), os.path.dirname(lab["topologyFile"])
-
-
 HOLD = 'echo; printf "done — press Enter to close"; read _'
+
+
+def in_clab_admins():
+    return getattr(os, "geteuid", lambda: -1)() == 0 or "clab_admins" in group_names()
+
+
+def clab_plan(clab_args, which=shutil.which, admin=None):
+    """A root-only containerlab command (destroy, start/stop/restart --node,
+    deploy --reconfigure, save): (argv, needs a terminal). Root or clab_admins
+    runs it directly; anyone else gets sudo, in a terminal so it can ask."""
+    clab = which("containerlab") or "containerlab"
+    admin = in_clab_admins() if admin is None else admin
+    return ([clab, *clab_args], False) if admin else (["sudo", clab, *clab_args], True)
+
+
+def remote_clab_script(clab_args):
+    """The same, decided on an ssh / WSL host (its own groups and sudo)."""
+    args = shlex.join(clab_args)
+    return (
+        'C=$(command -v containerlab); echo "$ containerlab ' + args.replace('"', '\\"') + '"; '
+        'if [ "$(id -u)" = 0 ] || id -nG | grep -qw clab_admins; '
+        f'then "$C" {args}; else sudo "$C" {args}; fi'
+    )
+
+
+def run_quietly(argv, cwd=None, timeout=600):
+    """(ok, last output line) of a command run without a terminal."""
+    try:
+        proc = subprocess.run(argv, cwd=cwd, capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL)
+    except FileNotFoundError:
+        return False, f"{argv[0]} not found"
+    except subprocess.TimeoutExpired:
+        return False, "timed out"
+    lines = [ln for ln in (proc.stderr + proc.stdout).splitlines() if ln.strip()]
+    return proc.returncode == 0, (lines[-1].strip() if lines else "")
+
+
+def run_clab_op(lab, clab_args, title, done_msg, terminal=False):
+    """Run a root-only containerlab command for a lab, local or on its host:
+    quietly with a notification when allowed, else in a terminal (sudo)."""
+    if lab.get("via") in HOST_TYPES:
+        conn = find_connection(lab.get("conn", ""))
+        if conn is None:
+            cmd_notify([title, "connection missing"])
+            return 1
+        return 0 if open_terminal(host_argv(conn, remote_clab_script(clab_args) + "; " + HOLD, interactive=True)) else 1
+    argv, needs_sudo = clab_plan(clab_args)
+    cwd = os.path.dirname(lab.get("topologyFile") or "") or None
+    if terminal or needs_sudo:
+        return 0 if open_terminal(hold_open(argv)) else 1
+    ok, last = run_quietly(argv, cwd=cwd)
+    cmd_notify([done_msg if ok else title, last if not ok else lab["name"]])
+    return 0 if ok else 1
+
+
+def find_lab(args_id, expected):
+    """A fresh snapshot's lab by id, if it still has the fingerprint the user saw."""
+    snap = take_snapshot(["--no-remote"] if not args_id.startswith("remote:") else [])
+    lab = next((lab for lab in snap["labs"] if lab["id"] == args_id), None)
+    if lab is None:
+        return None, "it is no longer there"
+    if lab["fingerprint"] != expected:
+        return None, "it changed since the widget last refreshed — look again and retry"
+    return lab, None
+
+
+def netlab_in_dir(lab, sub, which=shutil.which):
+    netlab = which("netlab") or "netlab"
+    return ["sh", "-c", 'cd "$1" && exec "$2" "$3"', "sh", lab["dir"], netlab, sub]
+
+
+def cmd_lab(args):
+    """lab <redeploy|save> <labId> <fingerprint>: redeploy a partial or
+    stopped lab (in a terminal: it takes a while), or save its configs."""
+    if len(args) < 3 or args[0] not in ("redeploy", "save"):
+        return usage()
+    op = args[0]
+    title = f"{'Redeploy' if op == 'redeploy' else 'Save'} failed"
+    lab, reason = find_lab(args[1], args[2])
+    if lab is None or op not in lab["actions"]:
+        cmd_notify([title, reason or f"{op} isn't possible for this lab"])
+        return 3
+    if lab["managedBy"] == "netlab":
+        sub = "restart" if op == "redeploy" else "collect"
+        if lab.get("via") in HOST_TYPES:
+            conn = find_connection(lab.get("conn", ""))
+            script = f"cd {shlex.quote(lab['dir'])} && echo '$ netlab {sub}' && netlab {sub}; {HOLD}"
+            return 0 if conn and open_terminal(host_argv(conn, script, interactive=True)) else 1
+        if op == "redeploy":
+            return 0 if open_terminal(hold_open(netlab_in_dir(lab, sub))) else 1
+        ok, last = run_quietly(netlab_in_dir(lab, sub))
+        cmd_notify([f"{lab['name']}: configs saved" if ok else title, last])
+        return 0 if ok else 1
+    clab_args = [op, "-t", lab["topologyFile"]]
+    done = f"{lab['name']} {'redeployed' if op == 'redeploy' else 'configs saved'}"
+    return run_clab_op(lab, clab_args, title, done, terminal=op == "redeploy")
+
+
+NODE_OP_WORDS = {"start": "started", "stop": "stopped", "restart": "restarted"}
+
+
+def k8s_restart_plan(conn, lab, node):
+    """Delete the node's pod; its Deployment starts a new one."""
+    return kubectl_argv(conn) + [
+        "-n", lab["namespace"], "delete", "pod", "--wait=false",
+        "-l", f"{C9S_OWNER}={lab['name']},{C9S_NODE}={node['name']}",
+    ]  # fmt: skip
+
+
+def cmd_node(args):
+    """node <start|stop|restart> <labId> <nodeName> <fingerprint>"""
+    if len(args) < 4 or args[0] not in NODE_OP_WORDS:
+        return usage()
+    op, lab_id, name, expected = args[:4]
+    title = f"{name} not {NODE_OP_WORDS[op]}"
+    lab, reason = find_lab(lab_id, expected)
+    node = next((n for n in lab["nodes"] if n["name"] == name), None) if lab else None
+    if lab is None or node is None or op not in node.get("ops", []):
+        cmd_notify([title, reason or f"{op} isn't possible for {name} right now"])
+        return 3
+    if lab.get("via") == "k8s":
+        conn = find_connection(lab.get("conn", ""))
+        ok, last = run_quietly(k8s_restart_plan(conn, lab, node)) if conn else (False, "connection missing")
+        cmd_notify([f"{name} restarting" if ok else title, last])
+        return 0 if ok else 1
+    return run_clab_op(lab, [op, "-t", lab["topologyFile"], "--node", name], title, f"{name} {NODE_OP_WORDS[op]}")
 
 
 def hold_open(argv, platform=sys.platform):
@@ -1899,19 +2408,46 @@ def hold_open(argv, platform=sys.platform):
     return ["sh", "-c", 'echo "\\$ $*"; "$@"; ' + HOLD, "sh", *argv]
 
 
-def ssh_stop_plan(conn, lab):
-    """Stop on an ssh host, in a local terminal (sudo may ask there). The host
-    decides root / clab_admins / sudo itself, like stop_plan does locally."""
+STOP_MODES = ("stop", "clean", "force")
+
+
+def stop_script(lab, mode="stop", netlab="netlab"):
+    """Shell script that stops a lab through its owner, run in a terminal here
+    or on its ssh / WSL host (so sudo can ask and output stays readable).
+
+    stop:  netlab down / containerlab destroy
+    clean: the same and delete what they generated (--cleanup)
+    force: for a broken lab: netlab down --force --cleanup; if the lab's
+           folder is gone, remove its containerlab side by name instead."""
+    q = shlex.quote
     if lab["managedBy"] == "netlab":
-        script = f"cd {shlex.quote(lab['dir'])} && echo '$ netlab down' && netlab down"
-    else:
-        topo = shlex.quote(lab["topologyFile"])
-        script = (
-            f'cd "$(dirname {topo})"; C=$(command -v containerlab); echo "$ containerlab destroy -t "{topo}; '
-            'if [ "$(id -u)" = 0 ] || id -nG | grep -qw clab_admins; '
-            f'then "$C" destroy -t {topo}; else sudo "$C" destroy -t {topo}; fi'
+        n = q(netlab)
+        flags = {"stop": "", "clean": " --cleanup", "force": " --force --cleanup"}[mode]
+        down = f"cd {q(lab['dir'])} && echo '$ netlab down{flags}' && {n} down{flags}"
+        if mode != "force":
+            return down
+        fallback = "echo 'the lab folder is gone'"
+        if lab.get("clabName"):
+            fallback += "; " + remote_clab_script(["destroy", "--name", lab["clabName"], "--cleanup"])
+        fallback += (
+            "; echo; echo 'netlab may still list this instance: netlab status --reset clears the"
+            " tracking (of every instance) once no other netlab lab runs'"
         )
-    return host_argv(conn, f"{script}; {HOLD}", interactive=True)
+        return f"if [ -d {q(lab['dir'])} ]; then {down}; else {fallback}; fi"
+    topo = lab.get("topologyFile") or ""
+    cleanup = ["--cleanup"] if mode != "stop" else []
+    by_file = remote_clab_script(["destroy", "-t", topo, *cleanup])
+    if mode == "force" or not topo:
+        # The topology file may be gone or broken: containerlab also destroys by name.
+        by_name = remote_clab_script(["destroy", "--name", lab.get("clabName") or lab["name"], "--cleanup"])
+        return f"if [ -f {q(topo)} ]; then {by_file}; else {by_name}; fi" if topo else by_name
+    return f"cd {q(os.path.dirname(topo))} 2>/dev/null; {by_file}"
+
+
+def ssh_stop_plan(conn, lab, mode="stop"):
+    """Stop on an ssh / WSL host, in a local terminal; the host decides root /
+    clab_admins / sudo itself."""
+    return host_argv(conn, f"{stop_script(lab, mode)}; {HOLD}", interactive=True)
 
 
 def group_names():
@@ -1925,7 +2461,7 @@ def group_names():
         return set()
 
 
-def check_stop(snap, lab_id, expected):
+def check_stop(snap, lab_id, expected, mode="stop"):
     """(lab, None) when the lab still looks like what the user confirmed,
     else (None, reason)."""
     lab = next((lab for lab in snap["labs"] if lab["id"] == lab_id), None)
@@ -1933,8 +2469,8 @@ def check_stop(snap, lab_id, expected):
         return None, "it is no longer running"
     if lab["fingerprint"] != expected:
         return None, "it changed since the widget last refreshed — look again and retry"
-    if "stop" not in lab["actions"]:
-        return None, "stopping it isn't supported from here"
+    if mode not in lab["actions"]:
+        return None, "stopping it that way isn't supported from here"
     return lab, None
 
 
@@ -1952,12 +2488,15 @@ def remote_destroy(conn, token, clab_name):
 
 
 def cmd_stop(args):
-    """stop <labId> <fingerprint>: tear a lab down through its owner, after
-    re-checking it is still the lab the user confirmed."""
+    """stop <labId> <fingerprint> [clean|force]: tear a lab down through its
+    owner, after re-checking it is still the lab the user confirmed."""
     if len(args) < 2:
         return usage()
+    mode = args[2] if len(args) > 2 else "stop"
+    if mode not in STOP_MODES:
+        return usage()
     snap = take_snapshot(["--no-remote"] if not args[0].startswith("remote:") else [])
-    lab, reason = check_stop(snap, args[0], args[1])
+    lab, reason = check_stop(snap, args[0], args[1], mode)
     if lab is None:
         cmd_notify(["Lab not stopped", f"{args[0].split(':')[-1]}: {reason}"])
         return 3
@@ -1969,7 +2508,7 @@ def cmd_stop(args):
         return 0
     if lab.get("via") in HOST_TYPES:
         conn = find_connection(lab.get("conn", ""))
-        if conn is None or not open_terminal(ssh_stop_plan(conn, lab)):
+        if conn is None or not open_terminal(ssh_stop_plan(conn, lab, mode)):
             cmd_notify([f"{lab['name']} not stopped", "connection missing" if conn is None else "no terminal found"])
             return 1
         return 0
@@ -1983,10 +2522,8 @@ def cmd_stop(args):
         title = f"{lab['name']} destroyed" if ok else f"{lab['name']} not stopped"
         cmd_notify([title, f"on {lab['host']}" + (f": {detail}" if detail else "")])
         return 0 if ok else 1
-    argv, cwd = stop_plan(lab)
-    # A terminal, so sudo can prompt and the output stays readable.
-    script = r'cd "$1" 2>/dev/null; shift; echo "\$ $*"; "$@"; ' + HOLD
-    if not open_terminal(["sh", "-c", script, "sh", cwd or "/", *argv]):
+    script = stop_script(lab, mode, shutil.which("netlab") or "netlab")
+    if not open_terminal(["sh", "-c", f"{script}; {HOLD}"]):
         cmd_notify([f"{lab['name']} not stopped", "no terminal emulator found"])
         return 1
     return 0
@@ -2039,6 +2576,14 @@ def main(argv):
         return cmd_shell(rest)
     if cmd == "notify":
         return cmd_notify(rest)
+    if cmd == "node":
+        return cmd_node(rest)
+    if cmd == "lab":
+        return cmd_lab(rest)
+    if cmd == "deploy":
+        return cmd_deploy(rest)
+    if cmd == "capture":
+        return cmd_capture(rest)
     if cmd == "stop":
         return cmd_stop(rest)
     if cmd == "login":

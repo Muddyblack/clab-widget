@@ -6,7 +6,7 @@ import "../../package/contents/ui/shared"
 // Off-screen render of the shared Popup, for visual checks and timings:
 //   QML_XHR_ALLOW_FILE_READ=1 QML_XHR_ALLOW_FILE_WRITE=1 QT_QPA_PLATFORM=offscreen \
 //     qml tests/render/Render.qml -- PAGE LAB SNAP.json OUT.png [QUERY]
-// PAGE: list | map | settings[-labs|-alerts|-look|-placement|-info] | menu (lab right-click menu) | nodemenu | hosts (remote hosts page, sample
+// PAGE: list | map | maplink (map, a link hovered) | settings[-labs|-alerts|-look|-placement|-info] | menu (lab right-click menu) | nodemenu | hosts (remote hosts page, sample
 // connections). LAB: lab name to expand / show on the map ("-" = none).
 // Without the qml tool: python3 tests/render/run.py tests/render/Render.qml PAGE LAB SNAP.json OUT.png
 // Writes parse / row-model / render times to OUT.png.timing.txt.
@@ -57,6 +57,9 @@ Rectangle {
         property string corner: "top-right"
         property string surfaceStyle: "tint"
         property bool frosted: true
+        property bool onlyMine: false
+        property var labFolders: ["~/labs", "~/netlab"]
+        property bool mapWindow: false
     }
 
     Popup {
@@ -109,6 +112,19 @@ Rectangle {
         xhr.onreadystatechange = function () {
             if (xhr.readyState !== XMLHttpRequest.DONE)
                 return;
+            // A snapshot 5 s older with fewer bytes on every link: link rates exist.
+            var older = Labs.parse(xhr.responseText);
+            if (older) {
+                older.observedAt = new Date(Date.parse(older.observedAt) - 5000).toISOString();
+                older.labs.forEach(l => (l.links || []).forEach(k => {
+                        if (k.bytes)
+                            k.bytes = Object.assign({}, k.bytes, {
+                                rx: Math.max(0, k.bytes.rx - 3000000),
+                                tx: Math.max(0, k.bytes.tx - 780000)
+                            });
+                    }));
+                pop.snapshot = older;
+            }
             var t0 = Date.now();
             var snap = Labs.parse(xhr.responseText);
             var t1 = Date.now();
@@ -131,9 +147,11 @@ Rectangle {
                     pop.toggleExpanded(lab.id, false);
                     var bad = lab.nodes.filter(nd => !nd.running)[0] || lab.nodes[0];
                     pop.nodeMenu(lab, bad, 230, 260);
-                } else if (root.page === "map") {
+                } else if (root.page === "map" || root.page === "maplink") {
                     pop.mapLabId = lab.id;
                     pop.page = "map";
+                    if (root.page === "maplink")
+                        hoverLink.start();
                 } else {
                     var t4 = Date.now();
                     pop.toggleExpanded(lab.id, false);
@@ -147,12 +165,31 @@ Rectangle {
                 pop.page = "settings";
                 if (root.page.indexOf("-") > 0)
                     pop.settingsTab = root.page.split("-")[1];
+                if (root.hasQuery)
+                    pop.settingsQuery = root.args[root.n - 1];
             }
             if (root.page === "hosts")
                 pop.page = "extra";
             shot.start();
         };
         xhr.send();
+    }
+
+    // maplink: hover the first link that has a rate, as the mouse would.
+    Timer {
+        id: hoverLink
+        interval: 600
+        onTriggered: {
+            var v = pop.mapItem, ls = v.graph.links;
+            for (var i = 0; i < ls.length; i++) {
+                var a = v.geo.pos[ls[i].a], b = v.geo.pos[ls[i].z];
+                if (a && b && ls[i].up === true) {
+                    v.hoverAt = Qt.point((a.x + b.x) / 2 * v.zoom, (a.y + b.y) / 2 * v.zoom);
+                    v.hoveredLink = i;
+                    return;
+                }
+            }
+        }
     }
 
     Timer {

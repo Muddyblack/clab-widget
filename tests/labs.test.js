@@ -7,7 +7,7 @@ const assert = require("assert");
 
 // Labs.js is a QML JS library; drop the pragma and expose its functions.
 const src = fs.readFileSync(path.join(__dirname, "../package/contents/code/Labs.js"), "utf8").replace(/^\.pragma library$/m, "");
-const Labs = new Function(src + "; return { q, parse, summaryText, badgeText, lifecycleText, memoryText, bytes, newTracker, trackEvents, duration, layoutNodes, mapLayout, mapGraph, togglePin, pinnedSegments, segmentText, pinnedFirst, nameFromId, rowsFor, syncModel, visibleLabs, shownSnapshot, sourceArgs, openArgs, shellArgs, fileUrl };")();
+const Labs = new Function(src + "; return { q, parse, summaryText, badgeText, lifecycleText, memoryText, bytes, newTracker, trackEvents, duration, layoutNodes, mapLayout, mapGraph, togglePin, pinnedSegments, segmentText, pinnedFirst, nameFromId, rowsFor, syncModel, visibleLabs, shownSnapshot, sourceArgs, openArgs, shellArgs, fileUrl, nodeOpArgs, labOpArgs, stopArgs, deployArgs, captureArgs, webUrl, linkKey, linkRates, bitRate, linkText };")();
 
 let failed = 0;
 function test(name, fn) {
@@ -383,6 +383,59 @@ test("open/shell args: local, API remote, ssh host", () => {
     assert.deepStrictEqual(Labs.shellArgs(ssh, node, "ssh").slice(-2), ["--via", "box"]);
     const wsl = Object.assign({}, ssh, {via: "wsl", conn: "wsl"});
     assert.deepStrictEqual(Labs.shellArgs(wsl, node, "exec").slice(-2), ["--via", "wsl"]);
+});
+
+test("action args: node ops, lab ops, stop modes, deploy, capture", () => {
+    const lab = {id: "clab:/l/fab.clab.yml", fingerprint: "f1", conn: "box"};
+    assert.deepStrictEqual(Labs.nodeOpArgs(lab, {name: "leaf2"}, "start"), ["node", "start", lab.id, "leaf2", "f1"]);
+    assert.deepStrictEqual(Labs.labOpArgs(lab, "redeploy"), ["lab", "redeploy", lab.id, "f1"]);
+    assert.deepStrictEqual(Labs.stopArgs(lab, "stop"), ["stop", lab.id, "f1"]);
+    assert.deepStrictEqual(Labs.stopArgs(lab, "clean"), ["stop", lab.id, "f1", "clean"]);
+    assert.deepStrictEqual(Labs.deployArgs({topologyFile: "/l/x.clab.yml"}), ["deploy", "/l/x.clab.yml"]);
+    const node = {container: "clab-fab-leaf1"};
+    assert.deepStrictEqual(Labs.captureArgs(lab, node, "e1-1"), ["capture", "clab-fab-leaf1", "e1-1"]);
+    assert.deepStrictEqual(Labs.captureArgs(Object.assign({via: "ssh"}, lab), node, "e1-1").slice(-2), ["--via", "box"]);
+    assert.deepStrictEqual(Labs.sourceArgs("both", ["~/labs", " ", "/srv/x"]), ["--scan", "~/labs", "--scan", "/srv/x"]);
+    assert.deepStrictEqual(Labs.sourceArgs("containerlab"), ["--no-netlab"]);
+});
+
+test("web URLs", () => {
+    assert.strictEqual(Labs.webUrl({ipv4: "172.20.20.2"}, 443), "https://172.20.20.2");
+    assert.strictEqual(Labs.webUrl({ipv4: "172.20.20.2"}, 8080), "http://172.20.20.2:8080");
+    assert.strictEqual(Labs.webUrl({ipv6: "3fff::2"}, 80), "http://[3fff::2]");
+});
+
+test("link rates from two snapshots, text", () => {
+    const link = (rx, tx) => ({a: "s1", aIf: "e1-1", z: "l1", zIf: "e1-1", up: true, bytes: {end: "s1", rx: rx, tx: tx}});
+    const snap = (t, l) => ({observedAt: t, labs: [{id: "L", links: [l]}]});
+    const r = Labs.linkRates(snap("2026-09-24T10:00:00Z", link(0, 0)), snap("2026-09-24T10:00:05Z", link(625000, 1250000)));
+    const k = Labs.linkKey(link(0, 0));
+    assert.deepStrictEqual(r.L[k], {rx: 1000000, tx: 2000000, end: "s1"});
+    assert.strictEqual(Labs.bitRate(r.L[k].tx), "2.0 Mb/s");
+    assert.strictEqual(Labs.bitRate(950), "950 b/s");
+    assert.strictEqual(Labs.linkText(link(0, 0), r.L[k]), "s1:e1-1 ↔ l1:e1-1 · up · ↑ 2.0 Mb/s ↓ 1.0 Mb/s");
+    // A node restart resets its counters: no negative rate.
+    assert.deepStrictEqual(Labs.linkRates(snap("2026-09-24T10:00:00Z", link(9e9, 9e9)), snap("2026-09-24T10:00:05Z", link(1, 1))), {});
+    assert.deepStrictEqual(Labs.linkRates(null, snap("x", link(1, 1))), {});
+});
+
+test("rows: only my labs, and the Not deployed group", () => {
+    const lab = (id, mine) => ({id: id, name: id, managedBy: "containerlab", lifecycle: "running", running: 1, total: 1, mine: mine, nodes: [{name: "n", kind: "linux", running: true}]});
+    const s = {labs: [lab("mine", true), lab("theirs", false)], undeployed: [
+        {id: "file:/l/a.clab.yml", name: "bgp", managedBy: "containerlab", topologyFile: "/l/a.clab.yml", dir: "/l"},
+        {id: "file:/n/topology.yml", name: "isis", managedBy: "netlab", topologyFile: "/n/topology.yml", dir: "/n"}
+    ]};
+    let m = Labs.rowsFor(s, {show: "both", onlyMine: true});
+    assert.deepStrictEqual(m.rows.map(r => r.key), ["Lmine", "Hundeployed"]); // collapsed while labs run
+    assert.strictEqual(m.byKey.Hundeployed.count, 2);
+    m = Labs.rowsFor(s, {show: "both", expanded: {undeployed: true}});
+    assert.deepStrictEqual(m.rows.map(r => r.type), ["lab", "lab", "header", "undeployed", "undeployed"]);
+    assert.strictEqual(m.counts.all, 2); // chips count deployed labs only
+    m = Labs.rowsFor(s, {show: "both", query: "isis"});
+    assert.deepStrictEqual(m.rows.map(r => r.key), ["Hundeployed", "Ufile:/n/topology.yml"]);
+    const shown = Labs.shownSnapshot(s, "both", true);
+    assert.deepStrictEqual(shown.labs.map(l => l.id), ["mine"]);
+    assert.strictEqual(shown.totals.labs, 1);
 });
 
 if (failed) {

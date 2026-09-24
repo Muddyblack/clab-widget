@@ -24,7 +24,7 @@ ShellRoot {
     property bool popupOpen: Quickshell.env("CLAB_WIDGET_OPEN") === "1"
 
     // What the pill counts and notifications cover: the labs the user chose to see.
-    readonly property var shown: Labs.shownSnapshot(snapshot, cfg.show)
+    readonly property var shown: Labs.shownSnapshot(snapshot, cfg.show, cfg.onlyMine)
     readonly property var totals: shown ? shown.totals : null
     readonly property var pinnedSegs: Labs.pinnedSegments(snapshot, cfg.pinned)
     readonly property string runTool: Qt.resolvedUrl("../package/contents/tools/run").toString().replace(/^file:\/\//, "")
@@ -60,9 +60,12 @@ ShellRoot {
             property string surfaceStyle: "tint"
             property string appIcon: "clab"
             property bool frosted: true
+            property bool onlyMine: false
+            property var labFolders: []
 
             onShowChanged: root.refresh()
             onModeChanged: root.refresh()
+            onLabFoldersChanged: root.refresh()
         }
     }
 
@@ -80,7 +83,7 @@ ShellRoot {
         // Memory + netlab per-node state are slow to collect; only while shown.
         if (root.popupOpen || root.desktopMode)
             args.push("--details");
-        args = args.concat(Labs.sourceArgs(cfg.show));
+        args = args.concat(Labs.sourceArgs(cfg.show, cfg.labFolders));
         snapshotProc.command = args;
         snapshotProc.running = true;
     }
@@ -183,7 +186,7 @@ ShellRoot {
                 root.snapshot = snap;
                 root.lastOkAt = Date.now();
                 root.failing = false;
-                root.notifyChanges(Labs.shownSnapshot(snap, cfg.show));
+                root.notifyChanges(Labs.shownSnapshot(snap, cfg.show, cfg.onlyMine));
             }
         }
     }

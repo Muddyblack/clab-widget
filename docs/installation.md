@@ -12,9 +12,14 @@ popup.
 | Windows 10/11 | the tray app (installer or zip) |
 | macOS | the tray app (`.dmg` or zip) |
 
+On the machine that runs your labs you need **containerlab ≥ 0.75** (node
+start/stop/restart) and, for netlab labs, **netlab ≥ 26.2** (`netlab status
+--format json`). *Settings → Info* shows which versions it found and turns red
+when one is too old.
+
 ## KDE Plasma 6
 
-From the KDE Store: *Add Widgets… → Get New Widgets → CLAB Widget*. Or
+From the [KDE Store](https://www.opendesktop.org/p/2373754/): *Add Widgets… → Get New Widgets → CLAB Widget*. Or
 download the `.plasmoid` from the
 [releases](https://github.com/Muddyblack/clab-widget/releases) and run
 `kpackagetool6 -t Plasma/Applet -i clab-widget-*.plasmoid`. From a checkout,
@@ -74,5 +79,21 @@ nix run github:Muddyblack/clab-widget#desktop     # tray app
 nix build github:Muddyblack/clab-widget           # the plasmoid package
 ```
 
-`nixosModules.default` (`programs.clab-widget`) installs the widget and
-containerlab (setuid for `clab_admins`) and adds your users to that group.
+`nixosModules.default` (`programs.clab-widget`) installs the widget and uses the
+containerlab and netlab you already have. The backend looks on your `PATH` and in
+`/run/wrappers/bin`, your Nix profiles, `~/.local/bin` and `/usr/local/bin`.
+`users` adds people to `clab_admins`, the group a setuid containerlab lets run
+labs without sudo. It installs the tools only when you ask:
+
+```nix
+programs.clab-widget = {
+  enable = true;
+  users = [ "me" ];
+  containerlab.enable = true;  # setuid for clab_admins, like containerlab's installer
+  netlab.enable = true;
+};
+```
+
+For development, `nix develop` (direnv) still brings both tools. The ones you
+have installed come first on `PATH` there too, so a setuid containerlab still
+wins.

@@ -73,12 +73,15 @@ it reuses their *data* so the map and node actions look and behave the same:
 
 | What | From | In this repo |
 | --- | --- | --- |
-| Node icons | clab-ui `src/icons/SvgGenerator.ts` (run as is with Node) | `package/contents/icons/nodes/*.svg` |
-| Role label → icon, default icon colour | clab-ui `src/core/types/graph.ts` (`ROLE_SVG_MAP`, `DEFAULT_ICON_COLOR`) | `package/contents/upstream/clab-ui-roles.json` |
-| `docker exec` command / SSH user per kind | vscode-containerlab `resources/exec_cmd.json`, `ssh_users.json` | `package/contents/upstream/*.json` |
+| Node icons | `packages/clab-ui/src/icons/SvgGenerator.ts` (run as is with Node) | `package/contents/icons/nodes/*.svg` |
+| Role label → icon, default icon colour | `packages/clab-ui/src/core/types/graph.ts` (`ROLE_SVG_MAP`, `DEFAULT_ICON_COLOR`) | `package/contents/upstream/clab-ui-roles.json` |
+| `docker exec` command / SSH user per kind | `apps/vscode-containerlab/resources/exec_cmd.json`, `ssh_users.json` | `package/contents/upstream/*.json` |
 
-`make sync-upstream` (tools/sync-upstream.py) clones both repos, regenerates
-those files and records the commits in `upstream/SOURCES.json`;
+All three live in [srl-labs/containerlab-app](https://github.com/srl-labs/containerlab-app);
+clab-ui and the VS Code extension moved into that monorepo, and their old repos
+only point there now. `make sync-upstream` (tools/sync-upstream.py) takes a
+sparse clone of it, regenerates those files and records the commit in
+`upstream/SOURCES.json`;
 `tools/sync-upstream.py --check` exits 1 when upstream has moved on. Don't edit
 the files by hand. If clab-ui adds a role, the tests say what else it needs:
 a tier in `ROLE_TIER` (Labs.js, map rows) and the schema's role list.

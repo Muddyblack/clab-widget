@@ -4,15 +4,16 @@ again when they change:
 
     python3 tools/sync-upstream.py            # fetch upstream, rewrite the files below
     python3 tools/sync-upstream.py --check    # exit 1 if upstream has changed (CI)
-    python3 tools/sync-upstream.py --clab-ui DIR --vscode DIR   # local checkouts instead
+    python3 tools/sync-upstream.py --repo DIR    # a local containerlab-app checkout instead
 
-From srl-labs/clab-ui (the containerlab-app / VS Code TopoViewer graph):
-  src/core/types/graph.ts   ROLE_SVG_MAP, DEFAULT_ICON_COLOR -> upstream/clab-ui-roles.json
-  src/icons/SvgGenerator.ts the node icons, run with Node   -> icons/nodes/<role>.svg
-From srl-labs/vscode-containerlab (the containerlab VS Code extension):
-  resources/exec_cmd.json, resources/ssh_users.json (verbatim) -> upstream/
+Everything comes from srl-labs/containerlab-app (the monorepo clab-ui and the
+VS Code extension moved into; the old srl-labs/clab-ui and
+srl-labs/vscode-containerlab repos only point there now):
+  packages/clab-ui/src/core/types/graph.ts   ROLE_SVG_MAP, DEFAULT_ICON_COLOR -> upstream/clab-ui-roles.json
+  packages/clab-ui/src/icons/SvgGenerator.ts the node icons, run with Node   -> icons/nodes/<role>.svg
+  apps/vscode-containerlab/resources/exec_cmd.json, ssh_users.json (verbatim) -> upstream/
 
-upstream/SOURCES.json records the commits. The widget reads these files at run
+A sparse clone fetches only those folders. upstream/SOURCES.json records the commit. The widget reads these files at run
 time; nothing of theirs is edited by hand here. Needs git and Node >= 22.6
 (TypeScript is run with --experimental-strip-types; no npm install).
 """
@@ -30,10 +31,9 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CONTENTS = os.path.join(ROOT, "package", "contents")
 UPSTREAM = os.path.join(CONTENTS, "upstream")
 ICONS = os.path.join(CONTENTS, "icons", "nodes")
-REPOS = {
-    "clab-ui": "https://github.com/srl-labs/clab-ui",
-    "vscode-containerlab": "https://github.com/srl-labs/vscode-containerlab",
-}
+REPO = "https://github.com/srl-labs/containerlab-app"
+CLAB_UI = "packages/clab-ui"
+VSCODE = "apps/vscode-containerlab"
 
 # Runs SvgGenerator.ts as is (its logger import swapped for a stub) and prints
 # {nodeType: svg} for every type in its NodeType union.
@@ -56,11 +56,12 @@ def git(*args, cwd=None):
     return subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True).stdout.strip()
 
 
-def checkout(name, path, tmp):
+def checkout(path, tmp):
     if path:
         return os.path.abspath(path)
-    dest = os.path.join(tmp, name)
-    git("clone", "--quiet", "--depth", "1", REPOS[name], dest)
+    dest = os.path.join(tmp, "containerlab-app")
+    git("clone", "--quiet", "--depth", "1", "--filter=blob:none", "--sparse", REPO, dest)
+    git("sparse-checkout", "set", f"{CLAB_UI}/src", f"{VSCODE}/resources", cwd=dest)
     return dest
 
 
@@ -129,16 +130,13 @@ def render(content):
 def main(argv):
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--check", action="store_true", help="only report differences; exit 1 if any")
-    ap.add_argument("--clab-ui", help="a local clab-ui checkout instead of cloning")
-    ap.add_argument("--vscode", help="a local vscode-containerlab checkout instead of cloning")
+    ap.add_argument("--repo", help="a local containerlab-app checkout instead of cloning")
     args = ap.parse_args(argv)
 
     with tempfile.TemporaryDirectory() as tmp:
-        clab_ui = checkout("clab-ui", args.clab_ui, tmp)
-        vscode = checkout("vscode-containerlab", args.vscode, tmp)
-        files = wanted_files(clab_ui, vscode, tmp)
-        paths = {"clab-ui": clab_ui, "vscode-containerlab": vscode}
-        sources = {name: git("rev-parse", "HEAD", cwd=path) for name, path in paths.items()}
+        repo = checkout(args.repo, tmp)
+        files = wanted_files(os.path.join(repo, CLAB_UI), os.path.join(repo, VSCODE), tmp)
+        sources = {"containerlab-app": git("rev-parse", "HEAD", cwd=repo)}
 
     changed = []
     for path, content in sorted(files.items()):
@@ -163,7 +161,7 @@ def main(argv):
     for p in stale:
         os.remove(os.path.join(ROOT, p))
     with open(os.path.join(UPSTREAM, "SOURCES.json"), "w", encoding="utf-8") as f:
-        json.dump({"repos": REPOS, "commits": sources}, f, indent=2)
+        json.dump({"repo": REPO, "paths": [CLAB_UI, VSCODE], "commits": sources}, f, indent=2)
         f.write("\n")
     for p in changed:
         print("updated:", p)

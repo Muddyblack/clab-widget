@@ -4,17 +4,19 @@
   <img src="assets/icon-netlab.png" width="150" alt="CLAB Widget icon (netlab)">
 </p>
 
-<h1 align="center">CLAB Widget</h1>
+<h1 align="center">clab widget</h1>
 
 <p align="center">
-  <!-- <a href="https://github.com/Muddyblack/clab-widget/releases"> -->
-    <!-- <img src="https://img.shields.io/badge/Download-Releases-1d99f3?style=for-the-badge&logo=github&logoColor=white" alt="Download" /> -->
-  <!-- </a> -->
-  <img src="https://img.shields.io/badge/KDE_Plasma-6-1d99f3?style=for-the-badge&logo=kde&logoColor=white" alt="KDE Plasma 6" />
+  <a href="https://www.opendesktop.org/p/2373754/">
+    <img src="https://img.shields.io/badge/KDE_Store-Download-1d99f3?style=for-the-badge&logo=kde&logoColor=white" alt="KDE Store" />
+  </a>
   <img src="https://img.shields.io/badge/Windows_·_macOS_·_GNOME-tray_app-4aa8ff?style=for-the-badge" alt="Windows, macOS, GNOME tray app" />
   <br/>
   <a href="LICENSE">
     <img src="https://img.shields.io/badge/License-GPL--3.0-blue?style=for-the-badge" alt="License: GPL-3.0" />
+  </a>
+  <a href="https://www.opendesktop.org/p/2373754/">
+    <img src="https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fapi.pling.com%2Focs%2Fv1%2Fcontent%2Fdata%2F2373754%3Fformat%3Djson&query=%24.data%5B0%5D.downloads&label=KDE%20Downloads&style=for-the-badge&color=1d99f3&logo=kde&logoColor=white" alt="KDE Store Downloads" />
   </a>
   <a href="https://github.com/Muddyblack/clab-widget/releases">
     <img src="https://img.shields.io/github/downloads/Muddyblack/clab-widget/total?style=for-the-badge&logo=github&logoColor=white&label=GitHub%20Downloads&color=blue" alt="GitHub Downloads" />
@@ -37,6 +39,8 @@ replacing them.
 
 ## Screenshots
 
+▶ [16-second showcase video](docs/readme/showcase.mp4) (`make video`)
+
 | Topology map | 102-node fabric |
 | :---: | :---: |
 | <img src="docs/readme/map.png" width="400" alt="Topology map of a leaf-spine lab with clab-ui role icons; links to the down leaf dashed red"> | <img src="docs/readme/map-large.png" width="400" alt="A 102-node data-centre fabric laid out by tiers"> |
@@ -44,6 +48,8 @@ replacing them.
 | <img src="docs/readme/menu.png" width="400" alt="Lab context menu: nodes, map, open, pin, copy, destroy"> | <img src="docs/readme/search-down.png" width="400" alt="Searching 'down' lists every node that isn't running"> |
 | **Remote hosts** | **Settings** |
 | <img src="docs/readme/hosts.png" width="400" alt="Remote hosts page: an ssh host, a Kubernetes cluster (clabernetes), a clab-api-server and a netlab-ui server"> | <img src="docs/readme/settings.png" width="400" alt="Settings in subtabs (Labs, Alerts, Look, Info); the Look tab: glass material, app icon, frosted blur"> |
+| **Info: tools on this machine** | |
+| <img src="docs/readme/info.png" width="400" alt="Info tab: installed containerlab 0.75.2 and netlab 26.9, both above the minimum versions"> | |
 
 The screenshots are rendered from the demo labs: `make screenshots`.
 
@@ -61,13 +67,28 @@ The screenshots are rendered from the demo labs: `make screenshots`.
   pinch and fit. Hover a node to highlight its links. Links are coloured
   like clab-ui while the popup is open: green up, dashed red down (read from
   each node's interfaces, no root needed); host / macvlan / mgmt-net ends
-  show as small endpoints. Labs of 150+ nodes are
+  show as small endpoints. Hover a link for its ends, state and live
+  throughput (busy links are drawn thicker); right-click it to copy the
+  endpoints or capture either end in Wireshark (`docker exec … tcpdump | wireshark`,
+  offered when the node has tcpdump). Labs of 150+ nodes are
   drawn as tiles, so a 700-node fabric stays smooth.
+- **Fix a node**: a node that went down gets a Start button, and every node has
+  Restart / Stop in its menu. These run containerlab's own `start|stop|restart
+  --node`, which keeps the node's links (a plain `docker stop` would drop them).
+  Also: its logs, console (telnet) for VM-based kinds, open its web UI, and
+  copy IP, MAC, image, kind or container ID.
 - **One click back**: ssh (per-kind user) or `netlab connect`, docker shell
   (`sr_cli`…), logs, open in the containerlab app / netlab-ui / VS Code, like
   the containerlab VS Code extension does it.
 - **Stop, carefully**: confirm, re-check that the lab is unchanged, then run it
   through its owner (`netlab down` / `containerlab destroy`) in a terminal.
+  Also destroy and delete the generated files (`--cleanup`), force-clean a
+  broken lab, redeploy a partial or stopped lab, and save the running configs
+  (`containerlab save`, `netlab collect`).
+- **Not deployed**: point it at your lab folders and it lists the
+  topologies there that aren't running (`*.clab.yml`, netlab `topology.yml`),
+  with Deploy, like the containerlab app.
+- **Only my labs**: hide labs other users deployed on a shared lab server.
 - **Remote hosts**: ssh and WSL run the widget's own status script on the lab
   machine, so you get everything a local widget there would show. Also
   clab-api-server and netlab-ui servers. See [docs/remote-hosts.md](docs/remote-hosts.md).

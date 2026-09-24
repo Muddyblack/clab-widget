@@ -84,16 +84,29 @@ def main(root, large=False, huge=False):
             out.append({"endpoints": eps})
         return {"nodes": {n: {"labels": {"graph-icon": r} if r else {}} for n, r in nodes.items()}, "links": out}
 
-    def ifaces(lab, data, down=()):
-        """Saved operstates per container (what `docker exec` would read):
-        every link end up except those in `down` (node, iface)."""
+    def ifaces(lab, data, down=(), srl=True):
+        """Saved probes per container (what the `docker exec` probe would read):
+        every link end up except those in `down` (node, iface), byte counters,
+        a MAC, tcpdump and the SR Linux web UI on 443."""
         out = {}
-        for link in data["links"]:
+        for i, link in enumerate(data["links"]):
             for ep in link["endpoints"].values():
                 if ep["node"] == "host":
                     continue
+                name = f"clab-{lab}-{ep['node']}"
+                probe = out.setdefault(
+                    name,
+                    {
+                        "ifaces": {},
+                        "counters": {},
+                        "mac": f"aa:c1:ab:{len(out) // 256:02x}:{len(out) % 256:02x}:01",
+                        "tcpdump": True,
+                        "ports": [443] if srl and not ep["node"].startswith("srv") else [],
+                    },
+                )
                 state = "down" if (ep["node"], ep["interface"]) in down else "up"
-                out.setdefault(f"clab-{lab}-{ep['node']}", {})[ep["interface"]] = state
+                probe["ifaces"][ep["interface"]] = state
+                probe["counters"][ep["interface"]] = [1_000_000 * (i + 1), 3_000_000 * (i + 1)]
         return out
 
     fab_data = topo_data(roles, links)
@@ -110,7 +123,7 @@ def main(root, large=False, huge=False):
         if {e["node"] for e in link["endpoints"].values()} == {"spine2", "leaf3"} and ep["node"] == "spine2"
     )
     with open(os.path.join(root, "ifaces.json"), "w") as f:
-        json.dump({**ifaces("fabric", fab_data, [down_end]), **ifaces("ospf", ospf_data)}, f)
+        json.dump({**ifaces("fabric", fab_data, [down_end]), **ifaces("ospf", ospf_data, srl=False)}, f)
 
     def c(lab, path, node, kind, ip, state="running", status="Up 3 hours"):
         return {
@@ -151,9 +164,26 @@ def main(root, large=False, huge=False):
     with open(os.path.join(root, "netlab.json"), "w") as f:
         json.dump(netlab, f)
 
+    # Topologies in the lab folder that aren't deployed (settings "Lab folders";
+    # the frontends pass --scan <root>/labs --scan <root>/netlab).
+    undeployed = {
+        "labs/bgp-evpn/bgp-evpn.clab.yml": "name: bgp-evpn\ntopology:\n  nodes: {}\n",
+        "labs/sros-ring/ring.clab.yml": "name: sros-ring\ntopology:\n  nodes: {}\n",
+        "netlab/isis-lab/topology.yml": "provider: clab\nnodes: [r1, r2]\n",
+    }
+    for rel, text in undeployed.items():
+        path = os.path.join(root, rel)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            f.write(text)
+
+    # What `containerlab version` / `netlab version` print (settings, Info tab).
+    with open(os.path.join(root, "versions.json"), "w") as f:
+        json.dump({"containerlab": "version: 0.75.2\ncommit: 1a2b3c4\n", "netlab": "netlab version 26.9\n"}, f)
+
     print(
         f"export CLAB_WIDGET_CLAB_JSON={root}/clab.json CLAB_WIDGET_NETLAB_JSON={root}/netlab.json"
-        f" CLAB_WIDGET_IFACES_JSON={root}/ifaces.json"
+        f" CLAB_WIDGET_IFACES_JSON={root}/ifaces.json CLAB_WIDGET_VERSIONS_JSON={root}/versions.json"
     )
 
 

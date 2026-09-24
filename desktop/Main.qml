@@ -17,7 +17,7 @@ Rectangle {
     property string connStatus: ""
     property bool connBusy: false
 
-    readonly property var shown: Labs.shownSnapshot(snapshot, cfg.show)
+    readonly property var shown: Labs.shownSnapshot(snapshot, cfg.show, cfg.onlyMine)
 
     width: 500
     implicitHeight: pop.implicitHeight + 8
@@ -41,6 +41,8 @@ Rectangle {
         property string surfaceStyle: "tint"
         property string appIcon: "clab"
         property bool frosted: true
+        property bool onlyMine: false
+        property var labFolders: []
 
         function save() {
             backend.saveSettings(JSON.stringify({
@@ -53,7 +55,9 @@ Rectangle {
                 mapWindow: cfg.mapWindow,
                 surfaceStyle: cfg.surfaceStyle,
                 appIcon: cfg.appIcon,
-                frosted: cfg.frosted
+                frosted: cfg.frosted,
+                onlyMine: cfg.onlyMine,
+                labFolders: cfg.labFolders
             }));
         }
         onPollSecondsChanged: save()
@@ -70,6 +74,11 @@ Rectangle {
         onNotifyNodeDownChanged: save()
         onReminderHoursChanged: save()
         onMapWindowChanged: save()
+        onOnlyMineChanged: save()
+        onLabFoldersChanged: {
+            save();
+            root.refresh();
+        }
         onSurfaceStyleChanged: save()
         onAppIconChanged: {
             save();
@@ -84,14 +93,14 @@ Rectangle {
             return;
         if (backend.popupVisible)
             args.push("--details");
-        backend.refresh(JSON.stringify(args.concat(Labs.sourceArgs(cfg.show))));
+        backend.refresh(JSON.stringify(args.concat(Labs.sourceArgs(cfg.show, cfg.labFolders))));
     }
 
     // Tray tooltip + dot: the pinned labs when there are any, else the totals.
     function publishTray() {
         var segs = Labs.pinnedSegments(root.snapshot, cfg.pinned);
         if (segs.length === 0) {
-            var t = Labs.shownSnapshot(root.snapshot, cfg.show);
+            var t = Labs.shownSnapshot(root.snapshot, cfg.show, cfg.onlyMine);
             if (t)
                 backend.setTrayState(JSON.stringify(t.totals), Labs.summaryText(t.totals));
             return;
@@ -119,7 +128,7 @@ Rectangle {
             root.snapshot = snap;
             root.lastOkAt = Date.now();
             root.failing = false;
-            var shown = Labs.shownSnapshot(snap, cfg.show);
+            var shown = Labs.shownSnapshot(snap, cfg.show, cfg.onlyMine);
             root.publishTray();
             var r = Labs.trackEvents(root.tracker, shown, {
                 notifyNodeDown: cfg.notifyNodeDown,

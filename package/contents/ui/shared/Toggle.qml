@@ -1,8 +1,9 @@
 import QtQuick
 import QtQuick.Layouts
 
-// Label + switch row for the settings page. Plain QtQuick: no QQC2 style
-// is guaranteed under Quickshell.
+// Label + switch, the studio's 36 × 21 pill: brand gradient when on, a
+// springy 15 px knob. Plain QtQuick: no QQC2 style is guaranteed under
+// Quickshell.
 RowLayout {
     id: toggle
 
@@ -11,9 +12,12 @@ RowLayout {
     property bool checked: false
     signal toggled(bool checked)
 
+    readonly property color brand: toggle.theme.clab || toggle.theme.ok
+
     spacing: 10
 
     Text {
+        visible: toggle.text !== ""
         Layout.fillWidth: true
         text: toggle.text
         color: toggle.theme.text
@@ -22,23 +26,38 @@ RowLayout {
     }
 
     Rectangle {
-        implicitWidth: 34
-        implicitHeight: 18
-        radius: 9
-        color: toggle.checked ? toggle.theme.ok : toggle.theme.badge
-        border.width: 1
+        implicitWidth: 36
+        implicitHeight: 21
+        radius: height / 2
+        color: toggle.checked ? toggle.brand : Qt.rgba(1, 1, 1, 0.12)
+        border.width: toggle.checked ? 0 : 1
         border.color: toggle.theme.border
+        gradient: toggle.checked ? onGradient : null
+
+        Gradient {
+            id: onGradient
+            GradientStop {
+                position: 0
+                color: Qt.lighter(toggle.brand, 1.25)
+            }
+            GradientStop {
+                position: 1
+                color: toggle.brand
+            }
+        }
 
         Rectangle {
-            width: 12
-            height: 12
-            radius: 6
+            width: 15
+            height: 15
+            radius: 7.5
             y: 3
-            x: toggle.checked ? parent.width - width - 3 : 3
-            color: "#ffffff"
+            x: toggle.checked ? 18 : 3
+            color: toggle.checked ? "#07111f" : "#e8edf5"
             Behavior on x {
                 NumberAnimation {
-                    duration: 120
+                    duration: 200
+                    easing.type: Easing.OutBack
+                    easing.overshoot: 2
                 }
             }
         }

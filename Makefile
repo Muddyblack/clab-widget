@@ -1,4 +1,4 @@
-.PHONY: help run view view-h view-hyprland hyprland install install-desktop screenshots sync-upstream test test-py test-js lint format pack run-desktop demo icons app-icons tag
+.PHONY: help run view view-h view-hyprland hyprland install install-desktop screenshots video sync-upstream test test-py test-js lint format pack run-desktop demo icons app-icons tag
 .DEFAULT_GOAL := help
 
 help: ## list targets
@@ -55,6 +55,9 @@ sync-upstream: ## pull clab-ui's node icons + role map and the VS Code extension
 
 screenshots: ## re-render the README images (docs/readme/*.png) from the demo labs (needs PySide6)
 	@python3 tests/render/screenshots.py
+
+video: screenshots ## short showcase clip (docs/readme/showcase.mp4); needs Pillow + ffmpeg or imageio-ffmpeg
+	@python3 tools/showcase-video.py
 
 demo: ## write demo labs to /tmp/clab-demo (use: eval "$(make -s demo)")
 	@python3 tests/demo.py /tmp/clab-demo --large

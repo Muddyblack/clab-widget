@@ -126,7 +126,8 @@ ColumnLayout {
 
             ActionButton {
                 theme: page.theme
-                text: (form.type === modelData.id ? "● " : "") + modelData.label
+                text: modelData.label
+                primary: form.type === modelData.id
                 onClicked: form.type = modelData.id
             }
         }
@@ -287,6 +288,7 @@ ColumnLayout {
 
         ActionButton {
             theme: page.theme
+            primary: true
             text: page.busy ? "…" : (form.type === "clab-api" ? (page.passwordLogin ? "log in & add" : "log in (terminal)") : (form.type === "ssh" || form.type === "wsl" || form.type === "k8s" ? "test & add" : "add"))
             onClicked: {
                 if (page.busy || nameField.text === "" || (urlField.text === "" && form.type !== "wsl" && form.type !== "k8s"))
