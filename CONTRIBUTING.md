@@ -95,8 +95,9 @@ in `tests/fixtures/` to show it.
 
 ## Releases
 
-`make tag` (./tag.sh) bumps the version in `package/metadata.json`, commits,
-tags and pushes. `.github/workflows/release.yml` then builds the `.plasmoid`
+`make tag` (./tag.sh) bumps the version in `package/metadata.json` on a
+`release/vX.Y.Z` branch and opens a PR. Merging it is the release:
+`.github/workflows/release.yml` creates the tag, then builds the `.plasmoid`
 and publishes the release; `desktop.yml` builds the Windows installer / zip and
 the macOS dmg / zip, checks each with its own `--selftest`, and attaches them.
 `make tag` with `--beta` (`./tag.sh --beta`) makes a pre-release.
